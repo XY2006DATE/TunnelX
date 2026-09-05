@@ -100,7 +100,7 @@ type ProxyRequestMessage struct {
 	ClientID  string `json:"client_id"`
 	LocalIP   string `json:"local_ip,omitempty"`
 	LocalPort int    `json:"local_port"`
-	ProxyType string `json:"proxy_type"` // tcp, udp, https (HTTP + HTTPS termination)
+	ProxyType string `json:"proxy_type"` // tcp, udp, https (server-side TLS termination)
 	ProxyName string `json:"proxy_name,omitempty"`
 }
 

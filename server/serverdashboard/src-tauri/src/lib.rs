@@ -1,6 +1,6 @@
 use reqwest::Client;
 use serde_json::Value;
-use std::{collections::HashMap, sync::Mutex};
+use std::{collections::HashMap, io, path::Path, sync::Mutex};
 use tauri::{path::BaseDirectory, Manager};
 use tauri_plugin_shell::{
     process::{CommandChild, CommandEvent},
@@ -9,18 +9,61 @@ use tauri_plugin_shell::{
 
 struct ApiClient(Client);
 struct ServerSidecar(Mutex<Option<CommandChild>>);
+struct ServerEndpoint(String);
+
+fn read_server_endpoint(config_path: &Path) -> io::Result<String> {
+    let contents = std::fs::read_to_string(config_path)?;
+    let mut section = "";
+    let mut port = None;
+    let mut tls_enabled = false;
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if !line.chars().next().is_some_and(char::is_whitespace) && trimmed.ends_with(':') {
+            section = trimmed.trim_end_matches(':');
+            continue;
+        }
+        let Some((key, raw_value)) = trimmed.split_once(':') else {
+            continue;
+        };
+        let value = raw_value
+            .split('#')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .trim_matches(['\'', '"']);
+        match (section, key.trim()) {
+            ("server", "bind_port") => {
+                port = Some(value.parse::<u16>().map_err(|error| {
+                    io::Error::new(io::ErrorKind::InvalidData, error.to_string())
+                })?)
+            }
+            ("tls", "enable") => tls_enabled = value.eq_ignore_ascii_case("true"),
+            _ => {}
+        }
+    }
+    let port = port.ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidData, "server.bind_port is missing")
+    })?;
+    let scheme = if tls_enabled { "https" } else { "http" };
+    Ok(format!("{}://127.0.0.1:{}", scheme, port))
+}
 
 #[tauri::command]
 async fn login(
     client: tauri::State<'_, ApiClient>,
+    endpoint: tauri::State<'_, ServerEndpoint>,
     base_url: String,
     password: String,
 ) -> Result<bool, String> {
+    drop(base_url);
     let mut form = HashMap::new();
     form.insert("password", password);
     let response = client
         .0
-        .post(format!("{}/login", base_url.trim_end_matches('/')))
+        .post(format!("{}/login", endpoint.0))
         .form(&form)
         .send()
         .await
@@ -35,13 +78,15 @@ async fn login(
 #[tauri::command]
 async fn api_request(
     client: tauri::State<'_, ApiClient>,
+    endpoint: tauri::State<'_, ServerEndpoint>,
     base_url: String,
     path: String,
     method: String,
     body: Option<Value>,
     form: Option<HashMap<String, String>>,
 ) -> Result<Value, String> {
-    let url = format!("{}{}", base_url.trim_end_matches('/'), path);
+    drop(base_url);
+    let url = format!("{}{}", endpoint.0, path);
     let mut request = if method == "POST" {
         client.0.post(url)
     } else {
@@ -70,6 +115,11 @@ async fn api_request(
 pub fn run() {
     let client = Client::builder()
         .cookie_store(true)
+        // The desktop wrapper only connects to its bundled sidecar over the
+        // loopback interface. A public certificate normally names the server
+        // domain rather than 127.0.0.1, so local certificate-name validation
+        // must not prevent the administration window from loading.
+        .danger_accept_invalid_certs(true)
         .build()
         .expect("http client");
     tauri::Builder::default()
@@ -84,6 +134,7 @@ pub fn run() {
             if !config.exists() {
                 std::fs::copy(&bundled_config, &config)?;
             }
+            app.manage(ServerEndpoint(read_server_endpoint(&config)?));
 
             let (mut events, child) = app
                 .shell()

@@ -11,17 +11,17 @@ import (
 	"github.com/XY2006DATE/TunnelX/server/proxy"
 )
 
-func TestValidateHTTPAndHTTPSProxyRequiresServerTLS(t *testing.T) {
+func TestValidateHTTPSProxyRequiresServerTLS(t *testing.T) {
 	requestManager := NewRequestManager(NewPortPool(24000, 24100), time.Hour)
 	withoutTLS := NewManager(auth.NewAuthenticator("test-token"), time.Hour, proxy.NewManager(), requestManager, "127.0.0.1")
 	if err := withoutTLS.ValidateProxyType("https"); err == nil {
-		t.Fatal("HTTP + HTTPS proxy was accepted without server TLS")
+		t.Fatal("HTTPS proxy was accepted without server TLS")
 	}
 
 	serverTLS := &tls.Config{Certificates: []tls.Certificate{{}}, MinVersion: tls.VersionTLS12}
 	withTLS := NewManager(auth.NewAuthenticator("test-token"), time.Hour, proxy.NewManager(), requestManager, "127.0.0.1", serverTLS)
 	if err := withTLS.ValidateProxyType("https"); err != nil {
-		t.Fatalf("HTTP + HTTPS proxy was rejected with server TLS: %v", err)
+		t.Fatalf("HTTPS proxy was rejected with server TLS: %v", err)
 	}
 }
 

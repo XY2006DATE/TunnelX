@@ -27,22 +27,32 @@ var webFS embed.FS
 
 // Dashboard Web管理界面
 type Dashboard struct {
-	port            int
-	passwordFile    string
-	passwordHash    string
-	sessionToken    string
-	token           string // 连接token
-	updateToken     func(string) error
-	updatePort      func(int) error
-	clientManager   *control.Manager
-	proxyManager    *proxy.Manager
-	server          *http.Server
-	stats           *Stats
-	statsFile       string
-	baseBytesIn     int64
-	baseBytesOut    int64
-	baseConnections int
-	mu              sync.RWMutex
+	runtimeConfig     RuntimeConfig
+	servingTLSEnabled bool
+	passwordFile      string
+	passwordHash      string
+	sessionToken      string
+	token             string // 连接token
+	updateToken       func(string) error
+	updateRuntime     func(RuntimeConfig) error
+	clientManager     *control.Manager
+	proxyManager      *proxy.Manager
+	server            *http.Server
+	stats             *Stats
+	statsFile         string
+	baseBytesIn       int64
+	baseBytesOut      int64
+	baseConnections   int
+	mu                sync.RWMutex
+}
+
+// RuntimeConfig contains settings that are persisted immediately and applied
+// to the listening socket the next time the server starts.
+type RuntimeConfig struct {
+	Port        int    `json:"port"`
+	TLSEnabled  bool   `json:"tls_enabled"`
+	TLSCertFile string `json:"tls_cert_file"`
+	TLSKeyFile  string `json:"tls_key_file"`
 }
 
 // Stats 统计信息
@@ -67,17 +77,18 @@ type ClientStat struct {
 }
 
 // NewDashboard 创建Dashboard
-func NewDashboard(port int, passwordFile, statsFile, token string, updateToken func(string) error, updatePort func(int) error, clientMgr *control.Manager, proxyMgr *proxy.Manager) *Dashboard {
+func NewDashboard(runtimeConfig RuntimeConfig, passwordFile, statsFile, token string, updateToken func(string) error, updateRuntime func(RuntimeConfig) error, clientMgr *control.Manager, proxyMgr *proxy.Manager) *Dashboard {
 	d := &Dashboard{
-		port:          port,
-		passwordFile:  passwordFile,
-		statsFile:     statsFile,
-		sessionToken:  randomHex(32),
-		token:         token,
-		updateToken:   updateToken,
-		updatePort:    updatePort,
-		clientManager: clientMgr,
-		proxyManager:  proxyMgr,
+		runtimeConfig:     runtimeConfig,
+		servingTLSEnabled: runtimeConfig.TLSEnabled,
+		passwordFile:      passwordFile,
+		statsFile:         statsFile,
+		sessionToken:      randomHex(32),
+		token:             token,
+		updateToken:       updateToken,
+		updateRuntime:     updateRuntime,
+		clientManager:     clientMgr,
+		proxyManager:      proxyMgr,
 		stats: &Stats{
 			ClientStats: make(map[string]*ClientStat),
 		},
@@ -100,7 +111,10 @@ func NewDashboard(port int, passwordFile, statsFile, token string, updateToken f
 
 // Start 启动Dashboard
 func (d *Dashboard) Start(bindAddr string) error {
-	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", bindAddr, d.port))
+	d.mu.RLock()
+	port := d.runtimeConfig.Port
+	d.mu.RUnlock()
+	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", bindAddr, port))
 	if err != nil {
 		return err
 	}
@@ -144,7 +158,17 @@ func (d *Dashboard) Serve(listener net.Listener) error {
 		Handler: mux,
 	}
 
-	util.Info("Dashboard started on http://%s", listener.Addr())
+	// 如果启用了 TLS，配置 HTTPS
+	d.mu.RLock()
+	tlsEnabled := d.servingTLSEnabled
+	d.mu.RUnlock()
+
+	protocol := "http"
+	if tlsEnabled {
+		protocol = "https"
+	}
+
+	util.Info("Dashboard started on %s://%s", protocol, listener.Addr())
 	if d.passwordHash == "" {
 		util.Info("Dashboard requires first-time password setup")
 	}
@@ -157,29 +181,56 @@ func (d *Dashboard) Serve(listener net.Listener) error {
 func (d *Dashboard) handleRuntimeConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost || r.Method == http.MethodPut {
 		var input struct {
-			Port int `json:"port"`
+			Port        *int    `json:"port"`
+			TLSEnabled  *bool   `json:"tls_enabled"`
+			TLSCertFile *string `json:"tls_cert_file"`
+			TLSKeyFile  *string `json:"tls_key_file"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&input); err != nil || input.Port < 1 || input.Port > 65535 {
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			http.Error(w, "Invalid runtime configuration", http.StatusBadRequest)
+			return
+		}
+
+		d.mu.RLock()
+		next := d.runtimeConfig
+		d.mu.RUnlock()
+		if input.Port != nil {
+			next.Port = *input.Port
+		}
+		if input.TLSEnabled != nil {
+			next.TLSEnabled = *input.TLSEnabled
+		}
+		if input.TLSCertFile != nil {
+			next.TLSCertFile = strings.TrimSpace(*input.TLSCertFile)
+		}
+		if input.TLSKeyFile != nil {
+			next.TLSKeyFile = strings.TrimSpace(*input.TLSKeyFile)
+		}
+		if next.Port < 1 || next.Port > 65535 {
 			http.Error(w, "Invalid port", http.StatusBadRequest)
 			return
 		}
-		if d.updatePort == nil {
-			http.Error(w, "Port update unavailable", http.StatusServiceUnavailable)
+		if next.TLSEnabled && (next.TLSCertFile == "" || next.TLSKeyFile == "") {
+			http.Error(w, "TLS certificate and private key are required", http.StatusBadRequest)
 			return
 		}
-		if err := d.updatePort(input.Port); err != nil {
+		if d.updateRuntime == nil {
+			http.Error(w, "Runtime configuration update unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if err := d.updateRuntime(next); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		d.mu.Lock()
-		d.port = input.Port
+		d.runtimeConfig = next
 		d.mu.Unlock()
 	}
 	d.mu.RLock()
-	port := d.port
+	runtimeConfig := d.runtimeConfig
 	d.mu.RUnlock()
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]int{"port": port})
+	json.NewEncoder(w).Encode(runtimeConfig)
 }
 
 // authMiddleware 认证中间件
@@ -206,6 +257,9 @@ func (d *Dashboard) handleLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if verifyPassword(r.FormValue("password"), d.passwordHash) {
+			d.mu.RLock()
+			secureCookie := d.servingTLSEnabled
+			d.mu.RUnlock()
 			// 设置认证cookie
 			http.SetCookie(w, &http.Cookie{
 				Name:     "auth",
@@ -213,6 +267,8 @@ func (d *Dashboard) handleLogin(w http.ResponseWriter, r *http.Request) {
 				Path:     "/",
 				MaxAge:   86400, // 24小时
 				HttpOnly: true,
+				Secure:   secureCookie,
+				SameSite: http.SameSiteStrictMode,
 			})
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]bool{"success": true})
@@ -588,7 +644,9 @@ func (d *Dashboard) handleDirectProxyRequest(w http.ResponseWriter, r *http.Requ
 
 // handleAPIApproveRequest 批准代理请求
 func (d *Dashboard) handleAPIApproveRequest(w http.ResponseWriter, r *http.Request) {
+	util.Info("[DEBUG] handleAPIApproveRequest called")
 	if r.Method != http.MethodPost {
+		util.Error("[DEBUG] Method not allowed: %s", r.Method)
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -600,56 +658,79 @@ func (d *Dashboard) handleAPIApproveRequest(w http.ResponseWriter, r *http.Reque
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		util.Error("[DEBUG] Failed to decode request body: %v", err)
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
+	util.Info("[DEBUG] Request decoded: RequestID=%s, RemotePort=%d, ProxyName=%s", req.RequestID, req.RemotePort, req.ProxyName)
 
 	if req.RemotePort < 0 || req.RemotePort > 65535 {
+		util.Error("[DEBUG] Invalid remote port: %d", req.RemotePort)
 		http.Error(w, "Remote port must be empty or between 1-65535", http.StatusBadRequest)
 		return
 	}
 
 	if req.ProxyName == "" {
+		util.Error("[DEBUG] Proxy name is empty")
 		http.Error(w, "Proxy name is required", http.StatusBadRequest)
 		return
 	}
 
 	requestMgr := d.clientManager.GetRequestManager()
 	if requestMgr == nil {
+		util.Error("[DEBUG] Request manager is nil")
 		http.Error(w, "Request manager not available", http.StatusInternalServerError)
 		return
 	}
+	util.Info("[DEBUG] Got request manager")
+
 	pendingRequest, ok := requestMgr.GetRequest(req.RequestID)
 	if !ok {
+		util.Error("[DEBUG] Request not found: %s", req.RequestID)
 		http.Error(w, "Request not found", http.StatusBadRequest)
 		return
 	}
+	util.Info("[DEBUG] Found pending request: Type=%s, LocalPort=%d", pendingRequest.ProxyType, pendingRequest.LocalPort)
+
 	if err := d.clientManager.ValidateProxyType(pendingRequest.ProxyType); err != nil {
+		util.Error("[DEBUG] Proxy type validation failed: %v", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	util.Info("[DEBUG] Proxy type validated: %s", pendingRequest.ProxyType)
 
 	// 未填写远程端口时从端口池自动分配；填写时使用管理员指定端口。
 	var proxyReq *control.ProxyRequest
 	var err error
 	if req.RemotePort == 0 {
+		util.Info("[DEBUG] Approving with auto-assigned port")
 		proxyReq, err = requestMgr.ApproveRequest(req.RequestID)
 		if err == nil {
 			proxyReq.ProxyName = req.ProxyName
+			util.Info("[DEBUG] Auto-assigned port: %d", proxyReq.RemotePort)
 		}
 	} else {
+		util.Info("[DEBUG] Approving with specified port: %d", req.RemotePort)
 		proxyReq, err = requestMgr.ApproveRequestWithPort(req.RequestID, req.RemotePort, req.ProxyName)
 	}
 	if err != nil {
+		util.Error("[DEBUG] Failed to approve request: %v", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := d.clientManager.SetupApprovedProxy(proxyReq.ClientID, &protocol.ProxyConfig{
+	util.Info("[DEBUG] Request approved: ClientID=%s, ProxyName=%s, RemotePort=%d", proxyReq.ClientID, proxyReq.ProxyName, proxyReq.RemotePort)
+
+	proxyConfig := &protocol.ProxyConfig{
 		Name: proxyReq.ProxyName, Type: proxyReq.ProxyType, LocalPort: proxyReq.LocalPort, RemotePort: proxyReq.RemotePort,
-	}); err != nil {
+	}
+	util.Info("[DEBUG] Setting up proxy: %+v", proxyConfig)
+
+	if err := d.clientManager.SetupApprovedProxy(proxyReq.ClientID, proxyConfig); err != nil {
+		util.Error("[DEBUG] Failed to setup proxy: %v", err)
 		http.Error(w, "Failed to start proxy: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	util.Info("[DEBUG] Proxy setup completed successfully")
 
 	// 发送审批消息给客户端
 	approval := &protocol.ProxyApprovalMessage{
@@ -661,12 +742,14 @@ func (d *Dashboard) handleAPIApproveRequest(w http.ResponseWriter, r *http.Reque
 		LocalPort:  proxyReq.LocalPort,
 		ProxyType:  proxyReq.ProxyType,
 	}
+	util.Info("[DEBUG] Sending approval to client: %+v", approval)
 
 	if err := d.clientManager.SendProxyApproval(proxyReq.ClientID, approval); err != nil {
-		util.Error("Failed to send approval: %v", err)
+		util.Error("[DEBUG] Failed to send approval to client: %v", err)
 		http.Error(w, "Failed to send approval to client", http.StatusInternalServerError)
 		return
 	}
+	util.Info("[DEBUG] Approval sent successfully")
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -674,6 +757,7 @@ func (d *Dashboard) handleAPIApproveRequest(w http.ResponseWriter, r *http.Reque
 		"remote_port": proxyReq.RemotePort,
 		"proxy_name":  proxyReq.ProxyName,
 	})
+	util.Info("[DEBUG] Response sent to dashboard")
 }
 
 // handleAPIRejectRequest 拒绝代理请求
