@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"bufio"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -14,9 +16,11 @@ import (
 // TCPProxy TCP代理
 type TCPProxy struct {
 	name             string
+	proxyType        string
 	remotePort       int
 	listener         net.Listener
 	manager          ProxyManager
+	tlsConfig        *tls.Config
 	mu               sync.RWMutex
 	running          bool
 	bytesIn          atomic.Int64
@@ -35,10 +39,28 @@ type ProxyManager interface {
 func NewTCPProxy(name string, remotePort int, manager ProxyManager) *TCPProxy {
 	return &TCPProxy{
 		name:       name,
+		proxyType:  "tcp",
 		remotePort: remotePort,
 		manager:    manager,
 		running:    false,
 	}
+}
+
+// NewHTTPAndHTTPSProxy creates one public listener that accepts plain HTTP and
+// HTTPS. HTTPS is terminated on the server and the decrypted HTTP stream is
+// forwarded to the client's local service.
+func NewHTTPAndHTTPSProxy(name string, remotePort int, manager ProxyManager, tlsConfig *tls.Config) (*TCPProxy, error) {
+	if tlsConfig == nil || len(tlsConfig.Certificates) == 0 {
+		return nil, fmt.Errorf("HTTP + HTTPS proxy requires server TLS certificate")
+	}
+	return &TCPProxy{
+		name:       name,
+		proxyType:  "https",
+		remotePort: remotePort,
+		manager:    manager,
+		tlsConfig:  tlsConfig.Clone(),
+		running:    false,
+	}, nil
 }
 
 // Start 启动TCP代理监听
@@ -77,16 +99,23 @@ func (p *TCPProxy) acceptLoop() {
 
 // handleConnection 处理单个连接
 func (p *TCPProxy) handleConnection(userConn net.Conn) {
-	defer userConn.Close()
 	p.connections.Add(1)
 	p.totalConnections.Add(1)
 	defer p.connections.Add(-1)
 
+	forwardConn, isTLS, err := p.prepareUserConnection(userConn)
+	if err != nil {
+		userConn.Close()
+		util.Debug("Failed to prepare public connection: %v", err)
+		return
+	}
+	defer forwardConn.Close()
+
 	connectionID := fmt.Sprintf("%s_%d", p.name, time.Now().UnixNano())
-	util.Debug("New connection: %s from %s", connectionID, userConn.RemoteAddr())
+	util.Debug("New connection: %s from %s (tls=%v)", connectionID, userConn.RemoteAddr(), isTLS)
 
 	// 通知客户端有新连接
-	if err := p.manager.NotifyNewConnection(p.name, connectionID, userConn); err != nil {
+	if err := p.manager.NotifyNewConnection(p.name, connectionID, forwardConn); err != nil {
 		util.Error("Failed to notify new connection: %v", err)
 		return
 	}
@@ -102,7 +131,52 @@ func (p *TCPProxy) handleConnection(userConn net.Conn) {
 	util.Debug("Work connection established: %s", connectionID)
 
 	// 双向转发数据
-	p.forwardData(userConn, workConn, connectionID)
+	p.forwardData(forwardConn, workConn, connectionID)
+}
+
+type bufferedConn struct {
+	net.Conn
+	reader *bufio.Reader
+}
+
+func (c *bufferedConn) Read(buf []byte) (int, error) {
+	return c.reader.Read(buf)
+}
+
+func (c *bufferedConn) CloseWrite() error {
+	if conn, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return conn.CloseWrite()
+	}
+	return nil
+}
+
+func (p *TCPProxy) prepareUserConnection(conn net.Conn) (net.Conn, bool, error) {
+	if p.tlsConfig == nil {
+		return conn, false, nil
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		return nil, false, err
+	}
+	reader := bufio.NewReader(conn)
+	first, err := reader.Peek(1)
+	if err != nil {
+		return nil, false, err
+	}
+	wrapped := &bufferedConn{Conn: conn, reader: reader}
+	if first[0] != 0x16 {
+		if err := conn.SetReadDeadline(time.Time{}); err != nil {
+			return nil, false, err
+		}
+		return wrapped, false, nil
+	}
+	tlsConn := tls.Server(wrapped, p.tlsConfig.Clone())
+	if err := tlsConn.Handshake(); err != nil {
+		return nil, true, fmt.Errorf("TLS handshake: %w", err)
+	}
+	if err := conn.SetReadDeadline(time.Time{}); err != nil {
+		return nil, true, err
+	}
+	return tlsConn, true, nil
 }
 
 // forwardData 双向转发数据
@@ -139,8 +213,8 @@ func (p *TCPProxy) forwardData(conn1, conn2 net.Conn, connectionID string) {
 }
 
 func closeWrite(conn net.Conn) {
-	if tcp, ok := conn.(*net.TCPConn); ok {
-		_ = tcp.CloseWrite()
+	if writer, ok := conn.(interface{ CloseWrite() error }); ok {
+		_ = writer.CloseWrite()
 	}
 }
 
@@ -168,4 +242,8 @@ func (p *TCPProxy) GetName() string {
 // GetRemotePort 获取远程端口
 func (p *TCPProxy) GetRemotePort() int {
 	return p.remotePort
+}
+
+func (p *TCPProxy) GetType() string {
+	return p.proxyType
 }

@@ -568,7 +568,7 @@ func (d *Dashboard) handleDirectProxyRequest(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "Invalid token", http.StatusUnauthorized)
 		return
 	}
-	if input.LocalIP == "" || input.LocalPort < 1 || input.LocalPort > 65535 || (input.ProxyType != "tcp" && input.ProxyType != "udp") {
+	if input.LocalIP == "" || input.LocalPort < 1 || input.LocalPort > 65535 || (input.ProxyType != "tcp" && input.ProxyType != "udp" && input.ProxyType != "https") {
 		http.Error(w, "Invalid local target or proxy type", http.StatusBadRequest)
 		return
 	}
@@ -617,6 +617,15 @@ func (d *Dashboard) handleAPIApproveRequest(w http.ResponseWriter, r *http.Reque
 	requestMgr := d.clientManager.GetRequestManager()
 	if requestMgr == nil {
 		http.Error(w, "Request manager not available", http.StatusInternalServerError)
+		return
+	}
+	pendingRequest, ok := requestMgr.GetRequest(req.RequestID)
+	if !ok {
+		http.Error(w, "Request not found", http.StatusBadRequest)
+		return
+	}
+	if err := d.clientManager.ValidateProxyType(pendingRequest.ProxyType); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 

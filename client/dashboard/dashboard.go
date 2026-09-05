@@ -375,7 +375,7 @@ func (d *ClientDashboard) handleAPIRequestProxy(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	if req.ProxyType != "tcp" && req.ProxyType != "udp" {
+	if req.ProxyType != "tcp" && req.ProxyType != "udp" && req.ProxyType != "https" {
 		http.Error(w, "Invalid proxy type", http.StatusBadRequest)
 		return
 	}

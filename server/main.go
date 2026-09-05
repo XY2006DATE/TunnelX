@@ -74,6 +74,7 @@ func NewServer(configFile string) (*Server, error) {
 		srv.proxyManager,
 		requestManager,
 		cfg.Server.BindAddr,
+		srv.tlsConfig,
 	)
 
 	// 创建Dashboard（如果启用）

@@ -78,7 +78,7 @@ func (m *Manager) List() []Info {
 	result := make([]Info, 0, len(m.proxies)+len(m.udpProxies))
 	for _, item := range m.proxies {
 		bytesIn, bytesOut, connections, totalConnections := item.Stats()
-		result = append(result, Info{Name: item.GetName(), Type: "tcp", RemotePort: item.GetRemotePort(), BytesIn: bytesIn, BytesOut: bytesOut, Connections: connections, TotalConnections: totalConnections})
+		result = append(result, Info{Name: item.GetName(), Type: item.GetType(), RemotePort: item.GetRemotePort(), BytesIn: bytesIn, BytesOut: bytesOut, Connections: connections, TotalConnections: totalConnections})
 	}
 	for _, item := range m.udpProxies {
 		result = append(result, Info{Name: item.GetName(), Type: "udp", RemotePort: item.GetRemotePort()})
