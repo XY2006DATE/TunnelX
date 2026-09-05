@@ -1,0 +1,19 @@
+server:
+  bind_addr: 127.0.0.1
+  bind_port: 7100
+auth:
+  method: token
+  token: your_secret_token_here
+tls:
+  enable: false
+log:
+  level: info
+  file: ../testdata/multi-server.log
+dashboard:
+  enable: true
+  port: 7100
+  password_file: ../testdata/multi-server.password
+port_pool:
+  start: 13001
+  end: 14000
+heartbeat_timeout: 90

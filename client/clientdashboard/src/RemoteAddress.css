@@ -1,0 +1,9 @@
+.data-table.six .data-head,
+.data-table.six .data-row {
+  grid-template-columns: .9fr .5fr .55fr .65fr 1.45fr 1.3fr;
+}
+
+.data-table.proxy-table .data-head,
+.data-table.proxy-table .data-row {
+  grid-template-columns: 1.05fr .45fr .55fr 1.2fr .55fr 1.05fr 42px;
+}

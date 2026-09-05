@@ -1,0 +1,43 @@
+# Operating systems and editors
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local assistant state
+.claude/
+
+# Go and release artifacts
+/bin/
+/dist/
+/package/
+**/bin/
+*.dmg
+*.deb
+*.rpm
+*.msi
+*.AppImage
+
+# JavaScript and Rust build artifacts
+**/node_modules/
+**/dist/
+**/dist-ssr/
+**/src-tauri/target/
+**/src-tauri/binaries/*
+
+# Runtime state and credentials
+*.log
+*.password
+*.stats.json
+.env
+.env.*
+*.pem
+*.key
+*.p12
+código
+
+# Temporary files
+*.tmp
+*.local

@@ -1,0 +1,19 @@
+client_id: sequential-client
+server_addr: ""
+server_port: 7100
+auth:
+    token: ""
+tls:
+    enable: false
+    ca_file: ""
+log:
+    level: info
+    file: testdata/sequential-client.log
+heartbeat:
+    interval: 30
+    timeout: 90
+dashboard:
+    enable: true
+    port: 7202
+    password_file: testdata/sequential-client.password
+proxies: []

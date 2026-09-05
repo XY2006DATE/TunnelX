@@ -1,0 +1,21 @@
+server_addr: "127.0.0.1"
+server_port: 17100
+auth:
+  token: "e2e-test-token"
+tls:
+  enable: false
+dashboard:
+  enable: true
+  port: 17501
+log:
+  level: "debug"
+  file: ""
+heartbeat:
+  interval: 1
+  timeout: 5
+proxies:
+  - name: "e2e-http"
+    type: "tcp"
+    local_ip: "127.0.0.1"
+    local_port: 18080
+    remote_port: 16000
