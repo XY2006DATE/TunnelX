@@ -1,6 +1,7 @@
 package control
 
 import (
+	"crypto/tls"
 	"fmt"
 	"net"
 	"sort"
@@ -32,10 +33,11 @@ type Manager struct {
 	requestManager   *RequestManager
 	deletedProxies   map[string]map[string]struct{}
 	bindAddr         string
+	tlsConfig        *tls.Config
 	mu               sync.RWMutex
 }
 
-func NewManager(authenticator *auth.Authenticator, heartbeatTimeout time.Duration, proxyMgr *proxy.Manager, requestMgr *RequestManager, bindAddr string) *Manager {
+func NewManager(authenticator *auth.Authenticator, heartbeatTimeout time.Duration, proxyMgr *proxy.Manager, requestMgr *RequestManager, bindAddr string, tlsConfigs ...*tls.Config) *Manager {
 	mgr := &Manager{
 		clients:          make(map[string]*ClientInfo),
 		authenticator:    authenticator,
@@ -45,6 +47,9 @@ func NewManager(authenticator *auth.Authenticator, heartbeatTimeout time.Duratio
 		requestManager:   requestMgr,
 		deletedProxies:   make(map[string]map[string]struct{}),
 		bindAddr:         bindAddr,
+	}
+	if len(tlsConfigs) > 0 && tlsConfigs[0] != nil {
+		mgr.tlsConfig = tlsConfigs[0].Clone()
 	}
 
 	go mgr.heartbeatChecker()

@@ -1,6 +1,6 @@
 # TunnelX Client
 
-TunnelX Client 运行在内网机器上，维护到一个或多个公网 TunnelX Server 的控制连接，并把服务端收到的流量转发到本机服务。客户端可以通过 Web Dashboard 申请 TCP/UDP 代理，也可以使用 YAML 预配置 TCP、UDP 和 HTTP 代理。
+TunnelX Client 运行在内网机器上，维护到一个或多个公网 TunnelX Server 的控制连接，并把服务端收到的流量转发到本机服务。客户端可以通过 Web Dashboard 申请 HTTP + HTTPS、TCP 或 UDP 代理，也可以使用 YAML 预配置代理。
 
 ## 编译和启动
 
@@ -21,7 +21,7 @@ make build-go
 4. 提交申请后，在服务端 Dashboard 中审批并指定公网端口。
 5. 审批成功后，代理会写入客户端 YAML；重启客户端后自动恢复。
 
-客户端 Dashboard 当前支持申请 TCP 和 UDP 代理。它默认监听 `0.0.0.0`，应使用主机防火墙限制访问来源。
+客户端 Dashboard 当前支持申请 HTTP + HTTPS、TCP 和 UDP 代理。它默认监听 `0.0.0.0`，应使用主机防火墙限制访问来源。
 
 ## 配置
 
@@ -90,6 +90,17 @@ proxies:
     remote_port: 10053
 ```
 
+### HTTP + HTTPS 公网端口
+
+本地服务为 `http://127.0.0.1:8080/doc.html` 时，在 Dashboard 选择“HTTP + HTTPS”并申请本地端口 8080。服务端管理员将公网端口指定为 8080 后，可以同时访问：
+
+```text
+http://xcloudy.cn:8080/doc.html
+https://xcloudy.cn:8080/doc.html
+```
+
+HTTPS 在 TunnelX Server 上使用其 `tls.cert_file` / `tls.key_file` 完成 TLS 握手，解密后的 HTTP 请求再转发到本地 8080。本地服务不需要配置证书。服务端必须启用 TLS，证书必须覆盖访问域名，公网端口必须位于 `port_pool` 范围内并已在防火墙或安全组中开放。
+
 ### HTTP 虚拟主机
 
 ```yaml
@@ -102,7 +113,7 @@ proxies:
       - tunnel.example.com
 ```
 
-域名需要解析到服务端公网地址。服务端会在 80 端口读取 HTTP `Host` 并转发到对应代理；当前不提供 HTTPS 虚拟主机终止。
+域名需要解析到服务端公网地址。服务端会在 80 端口读取 HTTP `Host` 并转发到对应代理。需要 HTTPS 时可使用上面的“HTTP + HTTPS 公网端口”类型。
 
 ## 多服务端
 

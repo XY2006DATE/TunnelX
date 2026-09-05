@@ -15,6 +15,9 @@ func (m *Manager) SetupApprovedProxy(clientID string, proxyConfig *protocol.Prox
 	if proxyConfig == nil {
 		return fmt.Errorf("proxy config is required")
 	}
+	if err := m.ValidateProxyType(proxyConfig.Type); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	if deleted := m.deletedProxies[clientID]; deleted != nil {
 		delete(deleted, proxyConfig.Name)
@@ -31,6 +34,21 @@ func (m *Manager) SetupApprovedProxy(clientID string, proxyConfig *protocol.Prox
 	client.Proxies[proxyConfig.Name] = proxyConfig
 	client.mu.Unlock()
 	return m.setupProxy(clientID, proxyConfig, m.bindAddr, m.proxyManager)
+}
+
+// ValidateProxyType verifies that this server can start the requested listener.
+func (m *Manager) ValidateProxyType(proxyType string) error {
+	switch proxyType {
+	case "tcp", "udp", "http":
+		return nil
+	case "https":
+		if m.tlsConfig == nil || len(m.tlsConfig.Certificates) == 0 {
+			return fmt.Errorf("HTTP + HTTPS proxy requires server TLS to be enabled")
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported proxy type: %s", proxyType)
+	}
 }
 
 // setupProxies 为客户端设置代理
@@ -72,6 +90,23 @@ func (m *Manager) setupProxy(clientID string, proxyConfig *protocol.ProxyConfig,
 		err = tcpProxy.Start(bindAddr)
 		if err == nil {
 			proxyMgr.AddProxy(tcpProxy)
+		}
+
+	case "https":
+		// Accept both HTTP and HTTPS on one public port. TLS is terminated
+		// with the server certificate before forwarding plain HTTP to the client.
+		webProxy, createErr := proxy.NewHTTPAndHTTPSProxy(
+			proxyConfig.Name,
+			proxyConfig.RemotePort,
+			wrapper,
+			m.tlsConfig,
+		)
+		if createErr != nil {
+			return createErr
+		}
+		err = webProxy.Start(bindAddr)
+		if err == nil {
+			proxyMgr.AddProxy(webProxy)
 		}
 
 	case "udp":

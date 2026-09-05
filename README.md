@@ -1,12 +1,13 @@
 # TunnelX
 
-TunnelX 是一个使用 Go 编写的内网穿透工具。它通过部署在公网的服务端，将外部 TCP、UDP 或基于域名的 HTTP 流量转发到内网客户端上的服务，并提供服务端与客户端管理界面。
+TunnelX 是一个使用 Go 编写的内网穿透工具。它通过部署在公网的服务端，将外部 TCP、UDP、HTTP 或 HTTPS 流量转发到内网客户端上的服务，并提供服务端与客户端管理界面。
 
 > 当前项目适合自托管和功能验证。上线到公网前，请务必更换认证令牌、启用 TLS、限制管理界面来源并配置防火墙。
 
 ## 功能
 
 - TCP 端口映射与 UDP 端口映射
+- 公网代理端口的 HTTP + HTTPS 双协议访问与服务端 TLS 终止
 - 基于 `Host` 的 HTTP 虚拟主机转发
 - Token 客户端认证和可选 TLS 传输
 - 客户端断线重连、心跳检测和多服务端会话
@@ -14,7 +15,7 @@ TunnelX 是一个使用 Go 编写的内网穿透工具。它通过部署在公�
 - 服务端、客户端 Web Dashboard 及 Tauri 桌面壳
 - Linux、macOS、Windows 的 amd64/arm64 CLI 发布包
 
-客户端 Dashboard 目前只支持申请 TCP/UDP 代理；HTTP 虚拟主机需要在 YAML 中预先配置。
+客户端 Dashboard 支持申请 HTTP + HTTPS、TCP 和 UDP 代理；基于域名的 HTTP 虚拟主机仍需在 YAML 中预先配置。
 
 ## 界面预览
 
@@ -101,7 +102,7 @@ port_pool:
 ./bin/tunnelx-client client/client.yaml
 ```
 
-访问 `http://客户端地址:7101` 并设置管理密码。在客户端页面填写服务端地址、端口、Token 和本地服务端口，提交 TCP 或 UDP 代理申请，然后到服务端 Dashboard 审批。
+访问 `http://客户端地址:7101` 并设置管理密码。在客户端页面填写完整服务地址、Token 和本地服务端口，提交 HTTP + HTTPS、TCP 或 UDP 代理申请，然后到服务端 Dashboard 审批。
 
 更完整的配置、端口与安全说明见：
 
