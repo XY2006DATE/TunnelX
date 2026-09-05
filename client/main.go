@@ -24,6 +24,7 @@ import (
 type serverSession struct {
 	key, addr, token string
 	port             int
+	tls              bool
 	controller       *control.Connection
 }
 type Client struct {
@@ -43,36 +44,54 @@ func canReuseSession(currentToken, submittedToken string, connected bool) bool {
 	return connected || currentToken == submittedToken
 }
 
-func normalizeServerEndpoint(raw string, fallbackPort int) (string, int, error) {
+func configuredTLS(value *bool, fallback bool) bool {
+	if value != nil {
+		return *value
+	}
+	return fallback
+}
+
+func normalizeServerEndpoint(raw string, fallbackPort int, fallbackTLS bool) (string, int, bool, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return "", 0, fmt.Errorf("服务端地址不能为空")
+		return "", 0, false, fmt.Errorf("服务端地址不能为空")
 	}
 	if ip := net.ParseIP(strings.Trim(raw, "[]")); ip != nil {
 		if fallbackPort < 1 || fallbackPort > 65535 {
-			return "", 0, fmt.Errorf("控制端口必须在 1-65535 之间")
+			return "", 0, false, fmt.Errorf("控制端口必须在 1-65535 之间")
 		}
-		return ip.String(), fallbackPort, nil
+		return ip.String(), fallbackPort, fallbackTLS, nil
 	}
 	candidate := raw
 	if !strings.Contains(candidate, "://") {
-		candidate = "tcp://" + candidate
+		candidate = "server://" + candidate
 	}
 	u, err := url.Parse(candidate)
 	if err != nil || u.Hostname() == "" {
-		return "", 0, fmt.Errorf("服务端地址格式不正确")
+		return "", 0, false, fmt.Errorf("服务端地址格式不正确")
+	}
+	tlsEnabled := fallbackTLS
+	switch strings.ToLower(u.Scheme) {
+	case "https", "tls":
+		tlsEnabled = true
+	case "http", "tcp":
+		tlsEnabled = false
+	case "server":
+		// An address without a scheme inherits the YAML tls.enable value.
+	default:
+		return "", 0, false, fmt.Errorf("服务端地址仅支持 http、https、tcp 或 tls 协议")
 	}
 	port := fallbackPort
 	if u.Port() != "" {
 		port, err = strconv.Atoi(u.Port())
 		if err != nil {
-			return "", 0, fmt.Errorf("控制端口格式不正确")
+			return "", 0, false, fmt.Errorf("控制端口格式不正确")
 		}
 	}
 	if port < 1 || port > 65535 {
-		return "", 0, fmt.Errorf("控制端口必须在 1-65535 之间")
+		return "", 0, false, fmt.Errorf("控制端口必须在 1-65535 之间")
 	}
-	return strings.ToLower(u.Hostname()), port, nil
+	return strings.ToLower(u.Hostname()), port, tlsEnabled, nil
 }
 
 func NewClient(file string) (*Client, error) {
@@ -91,6 +110,7 @@ func NewClient(file string) (*Client, error) {
 	}
 	c := &Client{config: cfg, configFile: file, sessions: map[string]*serverSession{}, requestSession: map[string]string{}, proxySession: map[string]string{}, requestManager: request.NewManager()}
 	groups := map[string][]config.ProxyConfig{}
+	groupTLS := map[string]bool{}
 	for i := range cfg.Proxies {
 		p := &cfg.Proxies[i]
 		if p.ServerAddr == "" {
@@ -105,7 +125,12 @@ func NewClient(file string) (*Client, error) {
 		if p.ServerAddr == "" || p.ServerToken == "" {
 			continue
 		}
+		tlsEnabled := configuredTLS(p.ServerTLS, cfg.TLS.Enable)
 		key := sessionKey(p.ServerAddr, p.ServerPort)
+		if existingTLS, ok := groupTLS[key]; ok && existingTLS != tlsEnabled {
+			return nil, fmt.Errorf("服务端 %s 同时配置了明文和 TLS 连接", key)
+		}
+		groupTLS[key] = tlsEnabled
 		groups[key] = append(groups[key], *p)
 		c.proxySession[key+"|"+p.Name] = key
 		id := "restored-" + key + "-" + p.Name
@@ -113,15 +138,18 @@ func NewClient(file string) (*Client, error) {
 	}
 	for key, proxies := range groups {
 		p := proxies[0]
-		c.addSession(key, p.ServerAddr, p.ServerPort, p.ServerToken, proxies)
+		c.addSession(key, p.ServerAddr, p.ServerPort, p.ServerToken, groupTLS[key], proxies)
 	}
 	for _, pending := range cfg.PendingDeletes {
 		if pending.ServerAddr == "" || pending.ServerPort == 0 || pending.ServerToken == "" {
 			continue
 		}
+		tlsEnabled := configuredTLS(pending.ServerTLS, cfg.TLS.Enable)
 		key := sessionKey(pending.ServerAddr, pending.ServerPort)
-		if c.sessions[key] == nil {
-			c.addSession(key, pending.ServerAddr, pending.ServerPort, pending.ServerToken, nil)
+		if existing := c.sessions[key]; existing == nil {
+			c.addSession(key, pending.ServerAddr, pending.ServerPort, pending.ServerToken, tlsEnabled, nil)
+		} else if existing.tls != tlsEnabled {
+			return nil, fmt.Errorf("服务端 %s 的待删除记录与代理使用了不同传输协议", key)
 		}
 	}
 	c.requestManager.SetOnProxyApprove(c.setupApprovedProxy)
@@ -130,17 +158,18 @@ func NewClient(file string) (*Client, error) {
 	return c, nil
 }
 
-func (c *Client) sessionConfig(addr string, port int, token string, proxies []config.ProxyConfig) *config.ClientConfig {
+func (c *Client) sessionConfig(addr string, port int, token string, tlsEnabled bool, proxies []config.ProxyConfig) *config.ClientConfig {
 	cfg := *c.config
 	cfg.ServerAddr = addr
 	cfg.ServerPort = port
 	cfg.Auth.Token = token
+	cfg.TLS.Enable = tlsEnabled
 	cfg.Proxies = append([]config.ProxyConfig(nil), proxies...)
 	return &cfg
 }
-func (c *Client) addSession(key, addr string, port int, token string, proxies []config.ProxyConfig) *serverSession {
-	s := &serverSession{key: key, addr: addr, port: port, token: token}
-	s.controller = control.NewConnection(c.sessionConfig(addr, port, token, proxies))
+func (c *Client) addSession(key, addr string, port int, token string, tlsEnabled bool, proxies []config.ProxyConfig) *serverSession {
+	s := &serverSession{key: key, addr: addr, port: port, token: token, tls: tlsEnabled}
+	s.controller = control.NewConnection(c.sessionConfig(addr, port, token, tlsEnabled, proxies))
 	s.controller.SetOnMessage(func(m *protocol.Message) { c.handleMessage(s, m) })
 	s.controller.SetOnServerSync(func(names []string) {
 		for _, name := range names {
@@ -159,12 +188,15 @@ func (c *Client) addSession(key, addr string, port int, token string, proxies []
 	c.sessionMu.Unlock()
 	return s
 }
-func (c *Client) getOrCreateSession(addr string, port int, token string) (*serverSession, error) {
+func (c *Client) getOrCreateSession(addr string, port int, token string, tlsEnabled bool) (*serverSession, error) {
 	key := sessionKey(addr, port)
 	c.sessionMu.RLock()
 	s := c.sessions[key]
 	c.sessionMu.RUnlock()
 	if s != nil {
+		if s.tls != tlsEnabled {
+			return nil, fmt.Errorf("该服务端已使用不同的传输协议连接")
+		}
 		// An already authenticated control channel remains valid when the server
 		// rotates its token. Reuse it without changing the stored credential or
 		// interrupting active proxies. A disconnected session still requires the
@@ -174,7 +206,7 @@ func (c *Client) getOrCreateSession(addr string, port int, token string) (*serve
 		}
 		return s, nil
 	}
-	return c.addSession(key, addr, port, token, nil), nil
+	return c.addSession(key, addr, port, token, tlsEnabled, nil), nil
 }
 
 func (c *Client) setupDashboard() {
@@ -196,14 +228,14 @@ func (c *Client) setupDashboard() {
 		if in.ServerAddr == "" || in.Token == "" {
 			return fmt.Errorf("服务端地址、控制端口和认证令牌不能为空")
 		}
-		serverAddr, serverPort, err := normalizeServerEndpoint(in.ServerAddr, in.ServerPort)
+		serverAddr, serverPort, tlsEnabled, err := normalizeServerEndpoint(in.ServerAddr, in.ServerPort, configuredTLS(in.ServerTLS, c.config.TLS.Enable))
 		if err != nil {
 			return err
 		}
 		if in.LocalIP != "127.0.0.1" && in.LocalIP != "localhost" {
 			return fmt.Errorf("本地地址仅支持 127.0.0.1 或 localhost")
 		}
-		s, err := c.getOrCreateSession(serverAddr, serverPort, in.Token)
+		s, err := c.getOrCreateSession(serverAddr, serverPort, in.Token, tlsEnabled)
 		if err != nil {
 			return err
 		}
@@ -302,7 +334,8 @@ func (c *Client) setupApprovedProxy(r *request.ProxyRequest) error {
 	if s == nil {
 		return fmt.Errorf("找不到申请所属的服务端")
 	}
-	p := config.ProxyConfig{ServerAddr: s.addr, ServerPort: s.port, ServerToken: s.token, Name: r.ProxyName, Type: r.ProxyType, LocalIP: r.LocalIP, LocalPort: r.LocalPort, RemotePort: r.RemotePort}
+	tlsEnabled := s.tls
+	p := config.ProxyConfig{ServerAddr: s.addr, ServerPort: s.port, ServerToken: s.token, ServerTLS: &tlsEnabled, Name: r.ProxyName, Type: r.ProxyType, LocalIP: r.LocalIP, LocalPort: r.LocalPort, RemotePort: r.RemotePort}
 	s.controller.AddProxy(p)
 	c.configMu.Lock()
 	updated := false
@@ -381,7 +414,8 @@ func (c *Client) queuePendingDelete(s *serverSession, name string) {
 			return
 		}
 	}
-	c.config.PendingDeletes = append(c.config.PendingDeletes, config.ProxyDeleteConfig{ServerAddr: s.addr, ServerPort: s.port, ServerToken: s.token, Name: name})
+	tlsEnabled := s.tls
+	c.config.PendingDeletes = append(c.config.PendingDeletes, config.ProxyDeleteConfig{ServerAddr: s.addr, ServerPort: s.port, ServerToken: s.token, ServerTLS: &tlsEnabled, Name: name})
 	_ = config.SaveClientConfig(c.configFile, c.config)
 }
 

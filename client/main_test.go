@@ -53,24 +53,30 @@ proxies:
 
 func TestNormalizeServerEndpoint(t *testing.T) {
 	tests := []struct {
-		input    string
-		fallback int
-		wantHost string
-		wantPort int
+		input       string
+		fallback    int
+		fallbackTLS bool
+		wantHost    string
+		wantPort    int
+		wantTLS     bool
 	}{
-		{"47.120.67.143", 7100, "47.120.67.143", 7100},
-		{"47.120.67.143:7200", 7100, "47.120.67.143", 7200},
-		{"http://47.120.67.143:7300/", 7100, "47.120.67.143", 7300},
-		{"HTTPS://Example.COM:7400/path", 7100, "example.com", 7400},
+		{"47.120.67.143", 7100, false, "47.120.67.143", 7100, false},
+		{"47.120.67.143:7200", 7100, true, "47.120.67.143", 7200, true},
+		{"http://47.120.67.143:7300/", 7100, true, "47.120.67.143", 7300, false},
+		{"https://xcloudy.cn:7100/", 7200, false, "xcloudy.cn", 7100, true},
+		{"TLS://Example.COM:7400", 7100, false, "example.com", 7400, true},
 	}
 	for _, tt := range tests {
-		host, port, err := normalizeServerEndpoint(tt.input, tt.fallback)
+		host, port, tlsEnabled, err := normalizeServerEndpoint(tt.input, tt.fallback, tt.fallbackTLS)
 		if err != nil {
 			t.Fatalf("normalize %q: %v", tt.input, err)
 		}
-		if host != tt.wantHost || port != tt.wantPort {
-			t.Fatalf("normalize %q = %s:%d, want %s:%d", tt.input, host, port, tt.wantHost, tt.wantPort)
+		if host != tt.wantHost || port != tt.wantPort || tlsEnabled != tt.wantTLS {
+			t.Fatalf("normalize %q = %s:%d tls=%t, want %s:%d tls=%t", tt.input, host, port, tlsEnabled, tt.wantHost, tt.wantPort, tt.wantTLS)
 		}
+	}
+	if _, _, _, err := normalizeServerEndpoint("ftp://xcloudy.cn:7100", 7100, false); err == nil {
+		t.Fatal("unsupported server URL scheme was accepted")
 	}
 }
 
@@ -99,8 +105,43 @@ proxies:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.getOrCreateSession("127.0.0.1", 7100, "different-token"); err == nil {
+	if _, err := client.getOrCreateSession("127.0.0.1", 7100, "different-token", false); err == nil {
 		t.Fatal("disconnected session accepted a different token")
+	}
+}
+
+func TestHTTPSProxyRestoresTLSForSession(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "client.yaml")
+	data := []byte(`client_id: tls-client
+log:
+  level: error
+dashboard:
+  enable: false
+proxies:
+  - server_addr: xcloudy.cn
+    server_port: 7100
+    server_token: test-token
+    server_tls: true
+    name: proxy-https
+    type: tcp
+    local_ip: 127.0.0.1
+    local_port: 8080
+    remote_port: 18080
+`)
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewClient(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := client.sessions["xcloudy.cn:7100"]
+	if session == nil || !session.tls {
+		t.Fatal("HTTPS proxy did not restore a TLS session")
+	}
+	if !client.sessionConfig(session.addr, session.port, session.token, session.tls, nil).TLS.Enable {
+		t.Fatal("TLS session controller did not enable TLS")
 	}
 }
 
@@ -113,6 +154,19 @@ func TestSessionTokenReuseRules(t *testing.T) {
 	}
 	if !canReuseSession("original-token", "original-token", false) {
 		t.Fatal("disconnected session should accept its configured token")
+	}
+}
+
+func TestConfiguredTLSOverridesGlobalDefault(t *testing.T) {
+	enabled, disabled := true, false
+	if !configuredTLS(&enabled, false) {
+		t.Fatal("explicit TLS setting was ignored")
+	}
+	if configuredTLS(&disabled, true) {
+		t.Fatal("explicit plain-text setting was ignored")
+	}
+	if !configuredTLS(nil, true) {
+		t.Fatal("missing per-server TLS setting did not inherit the global default")
 	}
 }
 

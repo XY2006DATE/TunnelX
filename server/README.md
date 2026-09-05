@@ -98,7 +98,7 @@ tls:
   key_file: /etc/tunnelx/tls/private.key
 ```
 
-客户端应同时设置 `tls.enable: true` 和可信的 `tls.ca_file`。客户端未配置 CA 文件时会跳过证书校验，只适合临时测试。
+客户端可以在 Dashboard 中直接填写 `https://域名:端口/`，或设置 `tls.enable: true`。使用公共 CA 证书时客户端可将 `tls.ca_file` 留空并使用操作系统可信根；使用私有 CA 时则应填写对应 CA 文件。客户端会校验证书链和服务端域名。
 
 ## systemd 示例
 

@@ -162,7 +162,9 @@ func (c *Connection) dialServer() (net.Conn, error) {
 		return conn, err
 	}
 
-	tlsConfig, err := transport.NewTLSClientConfig(c.config.TLS.CAFile, c.config.TLS.CAFile == "")
+	// An empty CA file intentionally uses the operating system trust store.
+	// Never disable certificate validation merely because a custom CA was not set.
+	tlsConfig, err := transport.NewTLSClientConfig(c.config.TLS.CAFile, false)
 	if err != nil {
 		conn.Close()
 		return nil, err
