@@ -16,6 +16,16 @@ TunnelX 是一个使用 Go 编写的内网穿透工具。它通过部署在公�
 
 客户端 Dashboard 目前只支持申请 TCP/UDP 代理；HTTP 虚拟主机需要在 YAML 中预先配置。
 
+## 界面预览
+
+### 客户端 Dashboard
+
+![TunnelX 客户端 Dashboard](client.png)
+
+### 服务端 Dashboard
+
+![TunnelX 服务端 Dashboard](server.png)
+
 ## 工作方式
 
 ```text
