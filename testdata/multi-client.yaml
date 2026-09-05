@@ -1,0 +1,30 @@
+client_id: multi-server-test-client
+server_addr: ""
+server_port: 7100
+auth:
+    token: ""
+tls:
+    enable: false
+    ca_file: ""
+log:
+    level: info
+    file: ../testdata/multi-client.log
+heartbeat:
+    interval: 30
+    timeout: 90
+dashboard:
+    enable: true
+    port: 7201
+    password_file: ../testdata/multi-client.password
+proxies:
+    - server_addr: 127.0.0.1
+      server_port: 7100
+      server_token: your_secret_token_here
+      name: local-http-6349
+      type: tcp
+      local_ip: 127.0.0.1
+      local_port: 6349
+      remote_port: 13001
+      custom_domains: []
+      use_encryption: false
+      use_compression: false

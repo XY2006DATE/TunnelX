@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{.Title}}</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>TunnelX Dashboard</h1>
+            <div class="user-info">
+                <a href="/logout">Logout</a>
+            </div>
+        </header>
+
+        <main>
+            <!-- Connection Token -->
+            <div class="section">
+                <h2>Connection Token</h2>
+                <div class="token-display">
+                    <input type="text" id="connection-token" readonly value="Loading...">
+                    <button onclick="copyToken()">Copy</button>
+                </div>
+            </div>
+
+            <!-- Pending Requests -->
+            <div class="section">
+                <h2>Pending Proxy Requests</h2>
+                <div class="token-info" style="margin-bottom: 15px; padding: 10px; background: #f8f9fa; border-radius: 4px;">
+                    <strong>Authentication Token:</strong> <span id="auth-token-display" style="font-family: monospace; color: #2c3e50;">Loading...</span>
+                    <button onclick="copyAuthToken()" style="margin-left: 10px;">Copy</button>
+                </div>
+                <table id="requests-table">
+                    <thead>
+                        <tr>
+                            <th>Client ID</th>
+                            <th>Local Port</th>
+                            <th>Type</th>
+                            <th>Request Time</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="requests-body">
+                        <tr>
+                            <td colspan="5" style="text-align:center;">No pending requests</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- 统计卡片 -->
+            <div class="stats-cards">
+                <div class="card">
+                    <h3>Online Clients</h3>
+                    <div class="stat-value" id="total-clients">0</div>
+                </div>
+                <div class="card">
+                    <h3>Active Connections</h3>
+                    <div class="stat-value" id="active-connections">0</div>
+                </div>
+                <div class="card">
+                    <h3>Traffic In</h3>
+                    <div class="stat-value" id="bytes-in">0 B</div>
+                </div>
+                <div class="card">
+                    <h3>Traffic Out</h3>
+                    <div class="stat-value" id="bytes-out">0 B</div>
+                </div>
+            </div>
+
+            <!-- 客户端列表 -->
+            <div class="section">
+                <h2>Clients</h2>
+                <table id="clients-table">
+                    <thead>
+                        <tr>
+                            <th>Client ID</th>
+                            <th>Address</th>
+                            <th>Connected At</th>
+                            <th>Last Heartbeat</th>
+                            <th>Proxies</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td colspan="6" class="loading">Loading...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="section">
+                <h2>Proxies</h2>
+                <table id="proxies-table"><thead><tr><th>Name</th><th>Client</th><th>Type</th><th>Local</th><th>Remote</th><th>Actions</th></tr></thead><tbody><tr><td colspan="6" class="loading">Loading...</td></tr></tbody></table>
+            </div>
+
+            <!-- 流量图表 -->
+            <div class="section">
+                <h2>Traffic</h2>
+                <canvas id="traffic-chart"></canvas>
+            </div>
+        </main>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

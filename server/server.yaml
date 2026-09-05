@@ -1,0 +1,23 @@
+server:
+    bind_addr: 0.0.0.0
+    bind_port: 7100
+auth:
+    method: token
+    token: your_secret_token_here
+tls:
+    enable: false
+    cert_file: ""
+    key_file: ""
+log:
+    level: info
+    file: server.log
+    max_size: 100
+    max_backups: 3
+dashboard:
+    enable: true
+    port: 7100
+    password_file: dashboard.password
+port_pool:
+    start: 3001
+    end: 20000
+heartbeat_timeout: 90

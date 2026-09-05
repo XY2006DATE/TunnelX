@@ -1,0 +1,19 @@
+client_id: ""
+server_addr: ""
+server_port: 7100
+auth:
+    token: ""
+tls:
+    enable: false
+    ca_file: ""
+log:
+    level: info
+    file: client.log
+heartbeat:
+    interval: 30
+    timeout: 90
+dashboard:
+    enable: true
+    port: 7101
+    password_file: dashboard.password
+proxies: []
