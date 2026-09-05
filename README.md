@@ -7,7 +7,7 @@ TunnelX 是一个使用 Go 编写的内网穿透工具。它通过部署在公�
 ## 功能
 
 - TCP 端口映射与 UDP 端口映射
-- 公网代理端口的 HTTP + HTTPS 双协议访问与服务端 TLS 终止
+- 公网 HTTPS 端口的服务端 TLS 终止，解密后穿透到客户端本地 HTTP 服务
 - 基于 `Host` 的 HTTP 虚拟主机转发
 - Token 客户端认证和可选 TLS 传输
 - 客户端断线重连、心跳检测和多服务端会话
@@ -15,17 +15,17 @@ TunnelX 是一个使用 Go 编写的内网穿透工具。它通过部署在公�
 - 服务端、客户端 Web Dashboard 及 Tauri 桌面壳
 - Linux、macOS、Windows 的 amd64/arm64 CLI 发布包
 
-客户端 Dashboard 支持申请 HTTP + HTTPS、TCP 和 UDP 代理；基于域名的 HTTP 虚拟主机仍需在 YAML 中预先配置。
+客户端 Dashboard 支持申请 HTTPS、TCP 和 UDP 代理；基于域名的 HTTP 虚拟主机仍需在 YAML 中预先配置。
 
 ## 界面预览
 
 ### 客户端 Dashboard
 
-![TunnelX 客户端 Dashboard](client.png)
+![TunnelX 客户端 Dashboard](photo/client.png)
 
 ### 服务端 Dashboard
 
-![TunnelX 服务端 Dashboard](server.png)
+![TunnelX 服务端 Dashboard](photo/server.png)
 
 ## 工作方式
 
@@ -94,7 +94,7 @@ port_pool:
 ./bin/tunnelx-server server/server.yaml
 ```
 
-访问 `http://服务器地址:7100`，首次打开时设置至少 8 位的管理密码。
+访问 `http://服务器地址:7100`，首次打开时设置至少 8 位的管理密码。可以在“设置”中配置 HTTPS 开关、证书链和私钥路径；保存后重启服务端生效。
 
 ### 3. 启动客户端
 
@@ -102,7 +102,7 @@ port_pool:
 ./bin/tunnelx-client client/client.yaml
 ```
 
-访问 `http://客户端地址:7101` 并设置管理密码。在客户端页面填写完整服务地址、Token 和本地服务端口，提交 HTTP + HTTPS、TCP 或 UDP 代理申请，然后到服务端 Dashboard 审批。
+访问 `http://客户端地址:7101` 并设置管理密码。在客户端页面填写完整服务地址、Token 和本地服务端口，提交 HTTPS、TCP 或 UDP 代理申请，然后到服务端 Dashboard 审批。
 
 更完整的配置、端口与安全说明见：
 
@@ -139,28 +139,27 @@ proxies:
 
 HTTP 虚拟主机固定监听服务端的 80 端口，因此需要相应权限、防火墙规则和指向服务端的 DNS 记录。
 
-## 多平台打包
+## 安装包
 
-默认一次生成 Linux、macOS、Windows 的 amd64/arm64 服务端和客户端压缩包：
-
-```bash
-./package.sh --version 0.1.0
-```
-
-发布物位于 `dist/`，并生成 `SHA256SUMS`。可按需选择目标或重新构建内嵌 Dashboard：
+在 macOS 上可以一次构建 Client/Server 的 `.app` 和 `.dmg`，共四个产物：
 
 ```bash
-./package.sh --version 0.1.0 --targets "linux/amd64 windows/amd64"
-./package.sh --version 0.1.0 --build-web
+./build-macos.sh
+# 或者
+make build-macos
 ```
 
-构建当前操作系统的 Tauri 桌面安装包：
+默认构建当前 Mac 的原生架构，也可显式传入 `--arch arm64` 或 `--arch x86_64`。产物会写入 `dist/macos-<架构>/`。
+
+构建 Client/Server 的 Debian 安装包：
 
 ```bash
-./package.sh --version 0.1.0 --desktop
+./build-deb.sh --arch amd64
+# 或者
+make build-deb
 ```
 
-Tauri 安装包必须在对应操作系统上原生构建；`--desktop` 不会跨系统生成安装器。
+Debian 产物会写入 `dist/deb-<架构>/`。Tauri 的 `.app` 和 `.dmg` 必须在 macOS 上构建。
 
 ## 项目结构
 
@@ -169,9 +168,10 @@ Tauri 安装包必须在对应操作系统上原生构建；`--desktop` 不会�
 ├── client/                 客户端、客户端 Dashboard 与桌面壳
 ├── common/                 配置、协议、认证、TLS 和通用组件
 ├── server/                 服务端、代理实现、Dashboard 与桌面壳
-├── testdata/               集成测试配置和测试站点
+├── photo/                  Dashboard 界面截图
 ├── Makefile                日常构建入口
-└── package.sh              多平台发布脚本
+├── build-macos.sh          macOS App/DMG 打包脚本
+└── build-deb.sh            Debian 安装包脚本
 ```
 
 ## 测试

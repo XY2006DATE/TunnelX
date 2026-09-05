@@ -29,6 +29,13 @@ type Server struct {
 	tlsConfig     *tls.Config
 }
 
+func wrapServerTLS(listener net.Listener, tlsConfig *tls.Config) net.Listener {
+	if tlsConfig == nil {
+		return listener
+	}
+	return tls.NewListener(listener, tlsConfig)
+}
+
 func NewServer(configFile string) (*Server, error) {
 	cfg, err := config.LoadServerConfig(configFile)
 	if err != nil {
@@ -80,7 +87,12 @@ func NewServer(configFile string) (*Server, error) {
 	// 创建Dashboard（如果启用）
 	if cfg.Dashboard.Enable {
 		srv.dashboard = dashboard.NewDashboard(
-			cfg.Server.BindPort,
+			dashboard.RuntimeConfig{
+				Port:        cfg.Server.BindPort,
+				TLSEnabled:  cfg.TLS.Enable,
+				TLSCertFile: cfg.TLS.CertFile,
+				TLSKeyFile:  cfg.TLS.KeyFile,
+			},
 			cfg.Dashboard.PasswordFile,
 			configFile+".stats.json",
 			cfg.Auth.Token,
@@ -95,13 +107,28 @@ func NewServer(configFile string) (*Server, error) {
 				util.Info("Connection token updated without interrupting existing client sessions")
 				return nil
 			},
-			func(port int) error {
+			func(next dashboard.RuntimeConfig) error {
+				if next.TLSEnabled {
+					if _, err := transport.NewTLSServerConfig(next.TLSCertFile, next.TLSKeyFile); err != nil {
+						return fmt.Errorf("validate TLS certificate: %w", err)
+					}
+				}
 				oldPort := cfg.Server.BindPort
-				cfg.Server.BindPort = port
-				cfg.Dashboard.Port = port
+				oldDashboardPort := cfg.Dashboard.Port
+				oldTLSEnabled := cfg.TLS.Enable
+				oldTLSCertFile := cfg.TLS.CertFile
+				oldTLSKeyFile := cfg.TLS.KeyFile
+				cfg.Server.BindPort = next.Port
+				cfg.Dashboard.Port = next.Port
+				cfg.TLS.Enable = next.TLSEnabled
+				cfg.TLS.CertFile = next.TLSCertFile
+				cfg.TLS.KeyFile = next.TLSKeyFile
 				if err := config.SaveServerConfig(configFile, cfg); err != nil {
 					cfg.Server.BindPort = oldPort
-					cfg.Dashboard.Port = oldPort
+					cfg.Dashboard.Port = oldDashboardPort
+					cfg.TLS.Enable = oldTLSEnabled
+					cfg.TLS.CertFile = oldTLSCertFile
+					cfg.TLS.KeyFile = oldTLSKeyFile
 					return err
 				}
 				return nil
@@ -121,24 +148,31 @@ func (s *Server) Start() error {
 	var listener net.Listener
 	var err error
 
-	if s.config.TLS.Enable {
-		listener, err = transport.ListenTLS("tcp", addr, s.tlsConfig)
-	} else {
-		listener, err = net.Listen("tcp", addr)
-	}
-
+	// 先创建基础 TCP listener，再在 cmux 外层统一完成 TLS 握手。
+	// 这样 cmux 才能根据解密后的 HTTP 请求头区分 Dashboard
+	// 和 TunnelX 控制协议。
+	listener, err = net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
 	defer listener.Close()
+	if s.config.TLS.Enable {
+		listener = wrapServerTLS(listener, s.tlsConfig)
+	}
 
-	util.Info("Server started on %s", addr)
+	protocol := "tcp"
+	if s.config.TLS.Enable {
+		protocol = "tls"
+	}
+	util.Info("Server started on %s://%s", protocol, addr)
 
 	// 控制协议与 Dashboard 共用同一个 TCP 端口。
 	if s.dashboard != nil {
+		// 使用 cmux 对已解密的流量进行协议复用。
 		multiplexer := cmux.New(listener)
 		httpListener := multiplexer.Match(cmux.HTTP1Fast())
 		controlListener := multiplexer.Match(cmux.Any())
+
 		go func() {
 			if err := s.dashboard.Serve(httpListener); err != nil && err != http.ErrServerClosed {
 				util.Error("Dashboard error: %v", err)

@@ -4,7 +4,7 @@ server_port: 7100
 auth:
     token: ""
 tls:
-    enable: false
+    enable: true
     ca_file: ""
 log:
     level: info

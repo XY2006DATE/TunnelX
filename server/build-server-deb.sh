@@ -77,6 +77,12 @@ port_pool:
 heartbeat_timeout: 90
 EOF
 
+# 将服务端配置声明为 Debian conffile。升级软件包时保留管理员已经
+# 修改过的端口、令牌与 HTTPS 证书配置。
+cat > "${BUILD_DIR}/DEBIAN/conffiles" << 'EOF'
+/etc/tunnelx/server.yaml
+EOF
+
 # 6. 创建systemd服务文件
 cat > "${BUILD_DIR}/lib/systemd/system/tunnelx-server.service" << 'EOF'
 [Unit]

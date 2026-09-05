@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"bufio"
 	"crypto/tls"
 	"fmt"
 	"io"
@@ -46,12 +45,12 @@ func NewTCPProxy(name string, remotePort int, manager ProxyManager) *TCPProxy {
 	}
 }
 
-// NewHTTPAndHTTPSProxy creates one public listener that accepts plain HTTP and
-// HTTPS. HTTPS is terminated on the server and the decrypted HTTP stream is
-// forwarded to the client's local service.
-func NewHTTPAndHTTPSProxy(name string, remotePort int, manager ProxyManager, tlsConfig *tls.Config) (*TCPProxy, error) {
+// NewHTTPSProxy creates an HTTPS public listener. TLS is terminated on the
+// server and the decrypted HTTP stream is forwarded to the client's local
+// service.
+func NewHTTPSProxy(name string, remotePort int, manager ProxyManager, tlsConfig *tls.Config) (*TCPProxy, error) {
 	if tlsConfig == nil || len(tlsConfig.Certificates) == 0 {
-		return nil, fmt.Errorf("HTTP + HTTPS proxy requires server TLS certificate")
+		return nil, fmt.Errorf("HTTPS proxy requires server TLS certificate")
 	}
 	return &TCPProxy{
 		name:       name,
@@ -61,6 +60,12 @@ func NewHTTPAndHTTPSProxy(name string, remotePort int, manager ProxyManager, tls
 		tlsConfig:  tlsConfig.Clone(),
 		running:    false,
 	}, nil
+}
+
+// NewHTTPAndHTTPSProxy is kept for compatibility with older callers. New code
+// should use NewHTTPSProxy; the public listener is HTTPS-only.
+func NewHTTPAndHTTPSProxy(name string, remotePort int, manager ProxyManager, tlsConfig *tls.Config) (*TCPProxy, error) {
+	return NewHTTPSProxy(name, remotePort, manager, tlsConfig)
 }
 
 // Start 启动TCP代理监听
@@ -134,22 +139,6 @@ func (p *TCPProxy) handleConnection(userConn net.Conn) {
 	p.forwardData(forwardConn, workConn, connectionID)
 }
 
-type bufferedConn struct {
-	net.Conn
-	reader *bufio.Reader
-}
-
-func (c *bufferedConn) Read(buf []byte) (int, error) {
-	return c.reader.Read(buf)
-}
-
-func (c *bufferedConn) CloseWrite() error {
-	if conn, ok := c.Conn.(interface{ CloseWrite() error }); ok {
-		return conn.CloseWrite()
-	}
-	return nil
-}
-
 func (p *TCPProxy) prepareUserConnection(conn net.Conn) (net.Conn, bool, error) {
 	if p.tlsConfig == nil {
 		return conn, false, nil
@@ -157,19 +146,7 @@ func (p *TCPProxy) prepareUserConnection(conn net.Conn) (net.Conn, bool, error) 
 	if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
 		return nil, false, err
 	}
-	reader := bufio.NewReader(conn)
-	first, err := reader.Peek(1)
-	if err != nil {
-		return nil, false, err
-	}
-	wrapped := &bufferedConn{Conn: conn, reader: reader}
-	if first[0] != 0x16 {
-		if err := conn.SetReadDeadline(time.Time{}); err != nil {
-			return nil, false, err
-		}
-		return wrapped, false, nil
-	}
-	tlsConn := tls.Server(wrapped, p.tlsConfig.Clone())
+	tlsConn := tls.Server(conn, p.tlsConfig.Clone())
 	if err := tlsConn.Handshake(); err != nil {
 		return nil, true, fmt.Errorf("TLS handshake: %w", err)
 	}

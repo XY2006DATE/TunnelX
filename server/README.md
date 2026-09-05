@@ -48,8 +48,8 @@ heartbeat_timeout: 90
 | `server.bind_addr` | 控制端口和代理端口的监听地址 |
 | `server.bind_port` | 控制协议与 Dashboard 的共享 TCP 端口 |
 | `auth.token` | 客户端认证令牌；为空会允许任意客户端连接，不建议公网使用 |
-| `tls.enable` | 是否对共享端口启用 TLS |
-| `tls.cert_file` / `tls.key_file` | TLS 证书链和私钥路径 |
+| `tls.enable` | 是否启用 TLS；同时供共享控制端口和 HTTPS 代理使用 |
+| `tls.cert_file` / `tls.key_file` | Dashboard/控制端口与 HTTPS 代理共用的证书链和私钥路径 |
 | `log.level` | `debug`、`info`、`warn` 或 `error` |
 | `log.file` | 日志文件；相对路径以进程工作目录为准 |
 | `dashboard.enable` | 是否启用服务端 Dashboard |
@@ -70,26 +70,33 @@ http://服务器地址:7100
 启用 TLS 后改用 `https://`。首次访问需要设置至少 8 位的管理员密码，哈希会写入 `dashboard.password_file`。Dashboard 可用于：
 
 - 查看连接、代理和流量统计
-- 审批或拒绝 HTTP + HTTPS、TCP、UDP 代理申请
+- 审批或拒绝 HTTPS、TCP、UDP 代理申请
 - 修改代理公网端口
 - 删除代理或客户端配置
 - 轮换连接 Token 和管理密码
+- 配置 HTTPS 开关、证书链和私钥路径（重启后生效）
 
 管理界面与控制端口默认监听所有网卡。公网部署时应通过防火墙、反向代理或安全组限制管理访问来源。
+
+## 配置文件保留
+
+桌面版只在首次运行时创建 `server.yaml`，升级或重新安装应用不会覆盖已经保存的端口、Token 和 HTTPS 配置。macOS 配置位于 `~/Library/Application Support/cn.xcloudy.tunnelx.server/server.yaml`。Linux DEB 将 `/etc/tunnelx/server.yaml` 注册为 conffile，升级软件包时同样保留管理员修改。
+
+卸载桌面应用本体不会自动删除外部配置；如需完全清除服务端数据，应另行删除对应的 Application Support 配置目录。
 
 ## 需要开放的端口
 
 | 端口 | 协议 | 用途 |
 | --- | --- | --- |
 | `server.bind_port` | TCP | 客户端控制/工作连接和 Dashboard |
-| `port_pool` 范围 | TCP/UDP | 动态分配的公网代理端口；HTTP + HTTPS 使用 TCP |
+| `port_pool` 范围 | TCP/UDP | 动态分配的公网代理端口；HTTPS 使用 TCP |
 | `80` | TCP | HTTP 虚拟主机，仅配置 HTTP 代理时使用 |
 
 只开放实际使用的代理端口。HTTP 虚拟主机监听 80 端口，在 Linux 上通常需要 root、`CAP_NET_BIND_SERVICE` 或端口转发。
 
 ## TLS
 
-配置证书后启用：
+可以在服务端 Dashboard 的“设置”页面填写证书链和私钥路径，也可以直接编辑 YAML：
 
 ```yaml
 tls:
@@ -100,7 +107,7 @@ tls:
 
 客户端可以在 Dashboard 中直接填写 `https://域名:端口/`，或设置 `tls.enable: true`。使用公共 CA 证书时客户端可将 `tls.ca_file` 留空并使用操作系统可信根；使用私有 CA 时则应填写对应 CA 文件。客户端会校验证书链和服务端域名。
 
-服务端启用 TLS 后，“HTTP + HTTPS”代理会复用同一张证书，在分配的公网端口上同时识别 HTTP 和 HTTPS。HTTPS 请求在服务端解密，随后以普通 HTTP 转发到客户端本地服务。例如本地 `http://127.0.0.1:8080/doc.html` 映射到公网端口 8080 后，可使用 `https://xcloudy.cn:8080/doc.html` 访问。证书需要覆盖 `xcloudy.cn`，且 8080 必须处于 `port_pool` 范围内并对公网开放。
+服务端启用 TLS 后，HTTPS 代理会复用同一张证书。公网 HTTPS 请求在服务端解密，随后通过隧道以普通 HTTP 转发到客户端本地服务。例如本地 `http://127.0.0.1:8080/doc.html` 映射到公网端口 8080 后，可使用 `https://xcloudy.cn:8080/doc.html` 访问，本地服务无需配置证书。证书需要覆盖 `xcloudy.cn`，且 8080 必须处于 `port_pool` 范围内并对公网开放。
 
 ## systemd 示例
 
@@ -129,6 +136,6 @@ WantedBy=multi-user.target
 - 客户端认证失败：确认两端 Token 完全一致，并检查是否连接到了正确端口。
 - Dashboard 无法访问：确认 `dashboard.enable` 为 `true`，并检查共享端口、防火墙及 HTTP/HTTPS 协议。
 - 代理审批失败：确认目标公网端口未占用，并位于端口池范围内。
-- HTTP + HTTPS 代理启动失败：确认服务端已启用 TLS，证书和私钥路径有效。
+- HTTPS 代理启动失败：确认服务端已启用 TLS，证书和私钥路径有效。
 - HTTP 代理启动失败：检查 80 端口占用情况以及进程绑定低端口的权限。
 - 客户端频繁离线：检查网络质量，并让 `heartbeat_timeout` 大于客户端心跳间隔。

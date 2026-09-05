@@ -43,7 +43,7 @@ func (m *Manager) ValidateProxyType(proxyType string) error {
 		return nil
 	case "https":
 		if m.tlsConfig == nil || len(m.tlsConfig.Certificates) == 0 {
-			return fmt.Errorf("HTTP + HTTPS proxy requires server TLS to be enabled")
+			return fmt.Errorf("HTTPS proxy requires server TLS to be enabled")
 		}
 		return nil
 	default:
@@ -93,9 +93,9 @@ func (m *Manager) setupProxy(clientID string, proxyConfig *protocol.ProxyConfig,
 		}
 
 	case "https":
-		// Accept both HTTP and HTTPS on one public port. TLS is terminated
-		// with the server certificate before forwarding plain HTTP to the client.
-		webProxy, createErr := proxy.NewHTTPAndHTTPSProxy(
+		// TLS is terminated with the server certificate before the decrypted
+		// HTTP stream is forwarded to the client's plain HTTP service.
+		webProxy, createErr := proxy.NewHTTPSProxy(
 			proxyConfig.Name,
 			proxyConfig.RemotePort,
 			wrapper,

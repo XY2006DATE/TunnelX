@@ -26,14 +26,14 @@ func testServerTLSConfig(t *testing.T) *tls.Config {
 	}
 }
 
-func TestHTTPAndHTTPSProxyRequiresCertificate(t *testing.T) {
-	if _, err := NewHTTPAndHTTPSProxy("web", 18080, nil, nil); err == nil {
-		t.Fatal("HTTP + HTTPS proxy accepted a missing TLS certificate")
+func TestHTTPSProxyRequiresCertificate(t *testing.T) {
+	if _, err := NewHTTPSProxy("web", 18080, nil, nil); err == nil {
+		t.Fatal("HTTPS proxy accepted a missing TLS certificate")
 	}
 }
 
-func TestHTTPAndHTTPSProxyAcceptsPlainHTTP(t *testing.T) {
-	proxy, err := NewHTTPAndHTTPSProxy("web", 18080, nil, testServerTLSConfig(t))
+func TestHTTPSProxyRejectsPlainHTTP(t *testing.T) {
+	proxy, err := NewHTTPSProxy("web", 18080, nil, testServerTLSConfig(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,35 +44,24 @@ func TestHTTPAndHTTPSProxyAcceptsPlainHTTP(t *testing.T) {
 		result <- preparedConnection{conn: conn, tls: isTLS, err: prepareErr}
 	}()
 
-	want := "GET /doc.html HTTP/1.1\r\nHost: xcloudy.cn\r\n\r\n"
+	plainRequest := "GET /doc.html HTTP/1.1\r\nHost: xcloudy.cn\r\n\r\n"
 	writeDone := make(chan error, 1)
 	go func() {
-		_, writeErr := clientConn.Write([]byte(want))
+		_, writeErr := clientConn.Write([]byte(plainRequest))
 		writeDone <- writeErr
 	}()
 	prepared := <-result
-	if prepared.err != nil {
-		t.Fatal(prepared.err)
+	if prepared.err == nil {
+		prepared.conn.Close()
+		t.Fatal("HTTPS proxy accepted a plain HTTP request")
 	}
-	defer prepared.conn.Close()
-	if prepared.tls {
-		t.Fatal("plain HTTP connection was detected as TLS")
-	}
-	got := make([]byte, len(want))
-	if _, err := io.ReadFull(prepared.conn, got); err != nil {
-		t.Fatal(err)
-	}
-	if err := <-writeDone; err != nil {
-		t.Fatal(err)
-	}
+	serverConn.Close()
+	<-writeDone
 	clientConn.Close()
-	if string(got) != want {
-		t.Fatalf("forwarded HTTP = %q, want %q", got, want)
-	}
 }
 
-func TestHTTPAndHTTPSProxyTerminatesTLS(t *testing.T) {
-	proxy, err := NewHTTPAndHTTPSProxy("web", 18080, nil, testServerTLSConfig(t))
+func TestHTTPSProxyTerminatesTLS(t *testing.T) {
+	proxy, err := NewHTTPSProxy("web", 18080, nil, testServerTLSConfig(t))
 	if err != nil {
 		t.Fatal(err)
 	}
