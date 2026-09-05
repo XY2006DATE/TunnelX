@@ -47,6 +47,7 @@ type ProxyDeleteConfig struct {
 	ServerAddr  string `yaml:"server_addr" json:"server_addr"`
 	ServerPort  int    `yaml:"server_port" json:"server_port"`
 	ServerToken string `yaml:"server_token" json:"-"`
+	ServerTLS   *bool  `yaml:"server_tls,omitempty" json:"server_tls,omitempty"`
 	Name        string `yaml:"name" json:"name"`
 }
 
@@ -54,6 +55,7 @@ type ProxyConfig struct {
 	ServerAddr     string   `yaml:"server_addr,omitempty" json:"server_addr,omitempty"`
 	ServerPort     int      `yaml:"server_port,omitempty" json:"server_port,omitempty"`
 	ServerToken    string   `yaml:"server_token,omitempty" json:"-"`
+	ServerTLS      *bool    `yaml:"server_tls,omitempty" json:"server_tls,omitempty"`
 	Name           string   `yaml:"name" json:"name"`
 	Type           string   `yaml:"type" json:"type"`
 	LocalIP        string   `yaml:"local_ip" json:"local_ip"`

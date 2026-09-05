@@ -40,6 +40,7 @@ type ClientDashboard struct {
 type ProxyRequestInput struct {
 	ServerAddr string `json:"server_addr"`
 	ServerPort int    `json:"server_port"`
+	ServerTLS  *bool  `json:"server_tls"`
 	Token      string `json:"token"`
 	LocalIP    string `json:"local_ip"`
 	LocalPort  int    `json:"local_port"`
