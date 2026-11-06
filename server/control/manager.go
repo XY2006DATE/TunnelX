@@ -99,9 +99,8 @@ func (m *Manager) HandleClient(conn net.Conn) {
 	}
 
 	m.mu.Lock()
-	if existingClient, exists := m.clients[req.ClientID]; exists {
-		existingClient.Conn.Close()
-		delete(m.clients, req.ClientID)
+	if m.clients[req.ClientID] != nil {
+		m.removeClientLocked(req.ClientID)
 		util.Info("Replaced existing client: %s", req.ClientID)
 	}
 
@@ -124,19 +123,22 @@ func (m *Manager) HandleClient(conn net.Conn) {
 		client.Proxies[proxy.Name] = proxy
 	}
 
+	// Keep the registration reply ahead of notifications from newly opened listeners.
+	client.sendMu.Lock()
 	m.clients[req.ClientID] = client
+	m.sessionMgr.CreateSession(req.ClientID, req.Token)
+	m.setupProxies(req.ClientID, client.Proxies, m.bindAddr, m.proxyManager)
 	m.mu.Unlock()
 
-	m.sessionMgr.CreateSession(req.ClientID, req.Token)
-
-	if err := m.sendRegisterResponse(conn, true, "register success", deleted); err != nil {
+	err = m.sendRegisterResponse(conn, true, "register success", deleted)
+	client.sendMu.Unlock()
+	if err != nil {
 		util.Error("Failed to send register response: %v", err)
-		m.RemoveClient(req.ClientID)
+		m.removeClientConnection(client)
 		return
 	}
 
 	util.Info("Client registered: %s (%d proxies)", req.ClientID, len(client.Proxies))
-	m.setupProxies(req.ClientID, client.Proxies, m.bindAddr, m.proxyManager)
 
 	m.handleHeartbeat(client)
 }
@@ -146,7 +148,7 @@ func (m *Manager) handleHeartbeat(client *ClientInfo) {
 		msg, err := protocol.RecvMessage(client.Conn)
 		if err != nil {
 			util.Info("Client disconnected: %s (%v)", client.ID, err)
-			m.RemoveClient(client.ID)
+			m.removeClientConnection(client)
 			return
 		}
 
@@ -163,7 +165,7 @@ func (m *Manager) handleHeartbeat(client *ClientInfo) {
 			})
 			if err := m.sendToClient(client, response); err != nil {
 				util.Error("Failed to send heartbeat response: %v", err)
-				m.RemoveClient(client.ID)
+				m.removeClientConnection(client)
 				return
 			}
 
@@ -214,7 +216,7 @@ func (m *Manager) handleHeartbeat(client *ClientInfo) {
 
 		case protocol.TypeClose:
 			util.Info("Client requested close: %s", client.ID)
-			m.RemoveClient(client.ID)
+			m.removeClientConnection(client)
 			return
 
 		default:
@@ -234,21 +236,21 @@ func (m *Manager) heartbeatChecker() {
 
 func (m *Manager) checkTimeouts() {
 	m.mu.RLock()
-	var timeoutClients []string
+	var timeoutClients []*ClientInfo
 	now := time.Now()
 
-	for clientID, client := range m.clients {
+	for _, client := range m.clients {
 		client.mu.RLock()
 		if now.Sub(client.LastHeartbeat) > m.heartbeatTimeout {
-			timeoutClients = append(timeoutClients, clientID)
+			timeoutClients = append(timeoutClients, client)
 		}
 		client.mu.RUnlock()
 	}
 	m.mu.RUnlock()
 
-	for _, clientID := range timeoutClients {
-		util.Warn("Client heartbeat timeout: %s", clientID)
-		m.RemoveClient(clientID)
+	for _, client := range timeoutClients {
+		util.Warn("Client heartbeat timeout: %s", client.ID)
+		m.removeClientConnection(client)
 	}
 
 	m.sessionMgr.CleanupExpiredSessions(m.heartbeatTimeout)
@@ -267,6 +269,20 @@ func (m *Manager) GetClient(clientID string) (*ClientInfo, error) {
 
 func (m *Manager) RemoveClient(clientID string) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.removeClientLocked(clientID)
+}
+
+// A read error from a replaced connection must not remove its replacement.
+func (m *Manager) removeClientConnection(client *ClientInfo) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.clients[client.ID] == client {
+		m.removeClientLocked(client.ID)
+	}
+}
+
+func (m *Manager) removeClientLocked(clientID string) {
 	if client, ok := m.clients[clientID]; ok {
 		client.mu.RLock()
 		proxies := make([]protocol.ProxyConfig, 0, len(client.Proxies))
@@ -277,7 +293,6 @@ func (m *Manager) RemoveClient(clientID string) {
 		client.Conn.Close()
 		delete(m.clients, clientID)
 		m.sessionMgr.DeleteSession(clientID)
-		m.mu.Unlock()
 		for _, item := range proxies {
 			if item.Type == "udp" {
 				m.proxyManager.RemoveUDPProxy(item.Name)
@@ -287,9 +302,7 @@ func (m *Manager) RemoveClient(clientID string) {
 			m.requestManager.ReleasePort(item.RemotePort)
 		}
 		util.Info("Client removed: %s", clientID)
-		return
 	}
-	m.mu.Unlock()
 }
 
 // DeleteClient permanently removes an online client's proxies from this server
@@ -328,7 +341,7 @@ func (m *Manager) DeleteClient(clientID string) error {
 	if err := m.sendToClient(client, message); err != nil {
 		util.Warn("Client deletion sync failed; it will be reconciled on reconnect: client=%s, error=%v", clientID, err)
 	}
-	m.RemoveClient(clientID)
+	m.removeClientConnection(client)
 	util.Info("Client deleted: %s, proxies=%d", clientID, len(proxies))
 	return nil
 }
@@ -500,8 +513,9 @@ func (m *Manager) sendRegisterResponse(conn net.Conn, success bool, message stri
 	resp := &protocol.RegisterResponse{
 		Success:        success,
 		Message:        message,
-		ServerVersion:  "1.0.0",
+		ServerVersion:  "0.2.0",
 		DeletedProxies: deleted,
+		UDPFramed:      success,
 	}
 	msg, _ := protocol.NewMessage(protocol.TypeRegisterAck, resp)
 	return protocol.SendMessage(conn, msg)

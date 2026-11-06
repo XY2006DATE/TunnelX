@@ -164,14 +164,14 @@ func (w *proxyWrapper) NotifyNewConnection(proxyName, connectionID string, conn 
 	}
 
 	// 然后通知客户端
-	return w.notifyClient(proxyName, connectionID)
+	return w.notifyClient(proxyName, connectionID, conn == nil)
 }
 
 func (w *proxyWrapper) GetWorkConn(connectionID string, timeout time.Duration) (net.Conn, error) {
 	return w.proxyMgr.GetWorkConn(connectionID, timeout)
 }
 
-func (w *proxyWrapper) notifyClient(proxyName, connectionID string) error {
+func (w *proxyWrapper) notifyClient(proxyName, connectionID string, udpFramed bool) error {
 	client, err := w.manager.GetClient(w.clientID)
 	if err != nil {
 		return err
@@ -181,6 +181,7 @@ func (w *proxyWrapper) notifyClient(proxyName, connectionID string) error {
 	req := &protocol.NewProxyRequest{
 		ProxyName:    proxyName,
 		ConnectionID: connectionID,
+		UDPFramed:    udpFramed,
 	}
 
 	msg, _ := protocol.NewMessage(protocol.TypeNewProxy, req)

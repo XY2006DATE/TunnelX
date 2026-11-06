@@ -69,6 +69,53 @@ func TestRegisterReturnsProxiesDeletedWhileClientWasOffline(t *testing.T) {
 	}
 }
 
+func TestOldControlConnectionDoesNotRemoveReplacement(t *testing.T) {
+	proxyManager := proxy.NewManager()
+	requestManager := NewRequestManager(NewPortPool(24000, 24100), time.Hour)
+	manager := NewManager(auth.NewAuthenticator("test-token"), time.Hour, proxyManager, requestManager, "127.0.0.1")
+	register, _ := protocol.NewMessage(protocol.TypeRegister, &protocol.RegisterRequest{
+		ClientID: "same-client", Token: "test-token",
+		Proxies: []protocol.ProxyConfig{{Name: "test-route", Type: "tcp", RemotePort: 0}},
+	})
+	dial := func() (net.Conn, <-chan struct{}) {
+		server, client := net.Pipe()
+		t.Cleanup(func() { client.Close() })
+		_ = client.SetDeadline(time.Now().Add(2 * time.Second))
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			manager.HandleClient(server)
+		}()
+		if err := protocol.SendMessage(client, register); err != nil {
+			t.Fatal(err)
+		}
+		ack, err := protocol.RecvMessage(client)
+		if err != nil || ack.Type != protocol.TypeRegisterAck {
+			t.Fatalf("registration: %v, %v", ack, err)
+		}
+		return client, done
+	}
+
+	_, oldDone := dial()
+	replacement, _ := dial()
+	select {
+	case <-oldDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("old control connection was not closed")
+	}
+	heartbeat, _ := protocol.NewMessage(protocol.TypeHeartbeat, &protocol.HeartbeatRequest{ClientID: "same-client"})
+	if err := protocol.SendMessage(replacement, heartbeat); err != nil {
+		t.Fatal(err)
+	}
+	ack, err := protocol.RecvMessage(replacement)
+	if err != nil || ack.Type != protocol.TypeHeartbeatAck {
+		t.Fatalf("replacement heartbeat: %v, %v", ack, err)
+	}
+	if _, ok := proxyManager.GetProxy("test-route"); !ok {
+		t.Fatal("replacement lost its proxy")
+	}
+}
+
 func TestDeleteClientSendsDeletionAndRemovesClient(t *testing.T) {
 	requestManager := NewRequestManager(NewPortPool(24000, 24100), time.Hour)
 	manager := NewManager(auth.NewAuthenticator("test-token"), time.Hour, proxy.NewManager(), requestManager, "127.0.0.1")

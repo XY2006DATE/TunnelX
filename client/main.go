@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -19,6 +21,7 @@ import (
 	"github.com/XY2006DATE/TunnelX/common/config"
 	"github.com/XY2006DATE/TunnelX/common/protocol"
 	"github.com/XY2006DATE/TunnelX/common/util"
+	"github.com/google/uuid"
 )
 
 type serverSession struct {
@@ -100,7 +103,7 @@ func NewClient(file string) (*Client, error) {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
 	if cfg.ClientID == "" {
-		cfg.ClientID = fmt.Sprintf("client_%d", time.Now().Unix())
+		cfg.ClientID = "client_" + uuid.NewString()
 		if err := config.SaveClientConfig(file, cfg); err != nil {
 			return nil, err
 		}
@@ -153,13 +156,14 @@ func NewClient(file string) (*Client, error) {
 		}
 	}
 	c.requestManager.SetOnProxyApprove(c.setupApprovedProxy)
-	c.setupDashboard()
 	util.Info("Client configuration loaded (servers=%d, proxies=%d)", len(c.sessions), len(cfg.Proxies))
 	return c, nil
 }
 
 func (c *Client) sessionConfig(addr string, port int, token string, tlsEnabled bool, proxies []config.ProxyConfig) *config.ClientConfig {
+	c.configMu.RLock()
 	cfg := *c.config
+	c.configMu.RUnlock()
 	cfg.ServerAddr = addr
 	cfg.ServerPort = port
 	cfg.Auth.Token = token
@@ -209,9 +213,9 @@ func (c *Client) getOrCreateSession(addr string, port int, token string, tlsEnab
 	return c.addSession(key, addr, port, token, tlsEnabled, nil), nil
 }
 
-func (c *Client) setupDashboard() {
-	if !c.config.Dashboard.Enable {
-		return
+func (c *Client) setupDashboard(desktop bool) error {
+	if !desktop && !c.config.Dashboard.Enable {
+		return nil
 	}
 	c.dashboard = dashboard.NewClientDashboard(c.config.Dashboard.Port, c.config.Dashboard.PasswordFile, func(port int) error {
 		c.configMu.Lock()
@@ -232,9 +236,6 @@ func (c *Client) setupDashboard() {
 		if err != nil {
 			return err
 		}
-		if in.LocalIP != "127.0.0.1" && in.LocalIP != "localhost" {
-			return fmt.Errorf("本地地址仅支持 127.0.0.1 或 localhost")
-		}
 		s, err := c.getOrCreateSession(serverAddr, serverPort, in.Token, tlsEnabled)
 		if err != nil {
 			return err
@@ -244,28 +245,48 @@ func (c *Client) setupDashboard() {
 				return fmt.Errorf("连接服务端失败: %w", err)
 			}
 		}
+		if in.ProxyType == "udp" && !s.controller.SupportsUDP() {
+			return fmt.Errorf("UDP 转发需要 TunnelX 0.2.0 或更新版服务端 / UDP requires TunnelX Server 0.2.0 or later")
+		}
 		return c.requestProxy(s, in.LocalIP, in.LocalPort, in.ProxyType)
 	})
 	c.dashboard.SetOnGetRequests(func() interface{} { return c.requestManager.GetAllRequests() })
 	c.dashboard.SetOnDeleteProxy(c.deleteProxy)
+	bind := "0.0.0.0"
+	if desktop {
+		bind = "127.0.0.1"
+	}
+	listener, err := c.dashboard.Listen(bind)
+	if err != nil {
+		c.dashboard = nil
+		return err
+	}
 	go func() {
-		if err := c.dashboard.Start("0.0.0.0"); err != nil {
+		if err := c.dashboard.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			util.Error("Dashboard failed: %v", err)
 		}
 	}()
+	if desktop {
+		fmt.Printf("TUNNELX_DASHBOARD_READY %d\n", listener.Addr().(*net.TCPAddr).Port)
+	}
+	return nil
 }
 
-func (c *Client) Start() error {
+func (c *Client) Start(desktop bool) error {
 	c.sessionMu.RLock()
 	ss := make([]*serverSession, 0, len(c.sessions))
 	for _, s := range c.sessions {
 		ss = append(ss, s)
 	}
 	c.sessionMu.RUnlock()
-	for _, s := range ss {
-		if err := s.controller.Connect(); err != nil {
-			util.Error("Restore server %s failed: %v", s.key, err)
+	if err := c.setupDashboard(desktop); err != nil {
+		if desktop {
+			return fmt.Errorf("cannot start local dashboard: %w", err)
 		}
+		util.Error("Dashboard failed: %v", err)
+	}
+	for _, s := range ss {
+		go s.controller.ConnectWithRetry()
 	}
 	if len(ss) == 0 {
 		util.Info("No approved proxies; waiting for a proxy request")
@@ -282,6 +303,17 @@ func (c *Client) handleMessage(s *serverSession, m *protocol.Message) {
 	case protocol.TypeProxyApproval:
 		var a protocol.ProxyApprovalMessage
 		if json.Unmarshal(m.Data, &a) == nil {
+			// Older servers can omit the target address when changing a public port.
+			if a.Approved && a.LocalIP == "" {
+				c.configMu.RLock()
+				for _, p := range c.config.Proxies {
+					if p.Name == a.ProxyName && p.ServerAddr == s.addr && p.ServerPort == s.port {
+						a.LocalIP = p.LocalIP
+						break
+					}
+				}
+				c.configMu.RUnlock()
+			}
 			c.sessionMu.Lock()
 			c.requestSession[a.RequestID] = s.key
 			c.sessionMu.Unlock()
@@ -315,7 +347,7 @@ func (c *Client) handleMessage(s *serverSession, m *protocol.Message) {
 	}
 }
 func (c *Client) requestProxy(s *serverSession, localIP string, port int, typ string) error {
-	name := fmt.Sprintf("%s-%d", typ, port)
+	name := fmt.Sprintf("%s-%d-%s", typ, port, uuid.NewString())
 	r, err := c.requestManager.CreateRequest(localIP, port, typ, name)
 	if err != nil {
 		return err
@@ -566,7 +598,7 @@ func (c *Client) updateDashboardStats() {
 			x := s.controller.TrafficSnapshot(p.Name)
 			st.TotalBytesIn += x.BytesIn
 			st.TotalBytesOut += x.BytesOut
-			st.ProxyStats[key+"|"+p.Name] = &dashboard.ProxyStat{ServerAddr: p.ServerAddr, ServerPort: p.ServerPort, Name: p.Name, Type: p.Type, LocalPort: p.LocalPort, RemotePort: p.RemotePort, BytesIn: x.BytesIn, BytesOut: x.BytesOut, Connections: x.Connections, LastActive: x.LastActive}
+			st.ProxyStats[key+"|"+p.Name] = &dashboard.ProxyStat{ServerAddr: p.ServerAddr, ServerPort: p.ServerPort, Name: p.Name, Type: p.Type, LocalIP: p.LocalIP, LocalPort: p.LocalPort, RemotePort: p.RemotePort, BytesIn: x.BytesIn, BytesOut: x.BytesOut, Connections: x.Connections, LastActive: x.LastActive}
 		}
 		c.dashboard.UpdateStats(st)
 	}
@@ -599,7 +631,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Failed to create client: %v\n", err)
 		os.Exit(1)
 	}
-	if err := c.Start(); err != nil {
+	if err := c.Start(len(os.Args) > 2 && os.Args[2] == "--desktop"); err != nil {
 		fmt.Fprintf(os.Stderr, "Client error: %v\n", err)
 		os.Exit(1)
 	}

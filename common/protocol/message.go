@@ -47,6 +47,7 @@ type RegisterResponse struct {
 	Message        string   `json:"message,omitempty"`
 	ServerVersion  string   `json:"server_version,omitempty"`
 	DeletedProxies []string `json:"deleted_proxies,omitempty"`
+	UDPFramed      bool     `json:"udp_framed,omitempty"`
 }
 
 // ProxyConfig 代理配置

@@ -3,13 +3,16 @@ set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REQUESTED_ARCH="native"
+CLIENT_ONLY=false
 
 usage() {
   cat <<'EOF'
 Build the TunnelX Client and Server macOS application bundles.
 
 Usage:
-  ./build-macos.sh [--arch native|arm64|x86_64]
+  ./build-macos.sh [--arch native|arm64|x86_64] [--client-only]
+
+Use --client-only to build just the Client app and DMG.
 
 Outputs (four artifacts):
   TunnelX-Client-<version>-macOS-<arch>.app
@@ -39,6 +42,10 @@ while (($# > 0)); do
       (($# >= 2)) || fail "--arch requires a value"
       REQUESTED_ARCH="$2"
       shift 2
+      ;;
+    --client-only)
+      CLIENT_ONLY=true
+      shift
       ;;
     -h|--help)
       usage
@@ -104,12 +111,12 @@ cd "$ROOT_DIR"
 CLIENT_VERSION="$(node -p "require('./client/clientdashboard/src-tauri/tauri.conf.json').version")"
 SERVER_VERSION="$(node -p "require('./server/serverdashboard/src-tauri/tauri.conf.json').version")"
 [[ -n "$CLIENT_VERSION" ]] || fail "client version is empty"
-[[ "$CLIENT_VERSION" == "$SERVER_VERSION" ]] || fail "client and server versions differ"
-VERSION="$CLIENT_VERSION"
-
 OUTPUT_DIR="$ROOT_DIR/dist/macos-$ARTIFACT_ARCH"
+if "$CLIENT_ONLY"; then
+  OUTPUT_DIR="$ROOT_DIR/dist/macos-client-$ARTIFACT_ARCH"
+fi
 case "$OUTPUT_DIR" in
-  "$ROOT_DIR"/dist/macos-arm64|"$ROOT_DIR"/dist/macos-x86_64) ;;
+  "$ROOT_DIR"/dist/macos-arm64|"$ROOT_DIR"/dist/macos-x86_64|"$ROOT_DIR"/dist/macos-client-arm64|"$ROOT_DIR"/dist/macos-client-x86_64) ;;
   *) fail "refusing unsafe output directory: $OUTPUT_DIR" ;;
 esac
 
@@ -120,13 +127,14 @@ build_component() {
   local component="$1"
   local display_name="$2"
   local product_name="$3"
+  local version="$4"
   local dashboard_dir="$ROOT_DIR/$component/${component}dashboard"
   local tauri_dir="$dashboard_dir/src-tauri"
   local sidecar="$tauri_dir/binaries/tunnelx-$component-$RUST_TARGET"
   local bundle_dir="$tauri_dir/target/$RUST_TARGET/release/bundle"
   local app_source="$bundle_dir/macos/$product_name.app"
-  local app_destination="$OUTPUT_DIR/TunnelX-$display_name-$VERSION-macOS-$ARTIFACT_ARCH.app"
-  local dmg_destination="$OUTPUT_DIR/TunnelX-$display_name-$VERSION-macOS-$ARTIFACT_ARCH.dmg"
+  local app_destination="$OUTPUT_DIR/TunnelX-$display_name-$version-macOS-$ARTIFACT_ARCH.app"
+  local dmg_destination="$OUTPUT_DIR/TunnelX-$display_name-$version-macOS-$ARTIFACT_ARCH.dmg"
   local dmg_source=""
 
   printf '\n[%s] Installing frontend dependencies...\n' "$display_name"
@@ -147,7 +155,10 @@ build_component() {
   printf '[%s] Building macOS .app and .dmg...\n' "$display_name"
   (
     cd "$dashboard_dir"
-    npm run tauri build -- --target "$RUST_TARGET" --bundles app,dmg
+    # Use the compiler that owns the target installed above, even when a
+    # different Rust installation (for example Homebrew) is first on PATH.
+    PATH="$(dirname "$(rustup which rustc)"):$PATH" \
+      npm run tauri build -- --target "$RUST_TARGET" --bundles app,dmg
   )
 
   [[ -d "$app_source" ]] || fail "$display_name app bundle not found: $app_source"
@@ -163,20 +174,26 @@ build_component() {
   cp "$dmg_source" "$dmg_destination"
 }
 
-printf 'Building TunnelX %s for macOS %s...\n' "$VERSION" "$ARTIFACT_ARCH"
-build_component client Client TunnelX
-build_component server Server "TunnelX Server"
+printf 'Building TunnelX for macOS %s...\n' "$ARTIFACT_ARCH"
+build_component client Client TunnelX "$CLIENT_VERSION"
+if ! "$CLIENT_ONLY"; then
+  build_component server Server "TunnelX Server" "$SERVER_VERSION"
+fi
 
 APP_COUNT="$(find "$OUTPUT_DIR" -maxdepth 1 -type d -name '*.app' | wc -l | tr -d '[:space:]')"
 DMG_COUNT="$(find "$OUTPUT_DIR" -maxdepth 1 -type f -name '*.dmg' | wc -l | tr -d '[:space:]')"
-[[ "$APP_COUNT" == "2" && "$DMG_COUNT" == "2" ]] || \
-  fail "expected two apps and two DMGs, found $APP_COUNT apps and $DMG_COUNT DMGs"
+EXPECTED_COUNT=2
+if "$CLIENT_ONLY"; then
+  EXPECTED_COUNT=1
+fi
+[[ "$APP_COUNT" == "$EXPECTED_COUNT" && "$DMG_COUNT" == "$EXPECTED_COUNT" ]] || \
+  fail "expected $EXPECTED_COUNT of each artifact, found $APP_COUNT apps and $DMG_COUNT DMGs"
 
 (
   cd "$OUTPUT_DIR"
-  shasum -a 256 ./*.dmg > SHA256SUMS
+  shasum -a 256 *.dmg > SHA256SUMS
 )
 
-printf '\nBuild complete. Four macOS artifacts:\n'
+printf '\nBuild complete. macOS artifacts:\n'
 find "$OUTPUT_DIR" -maxdepth 1 \( -type f -name '*.dmg' -o -type d -name '*.app' \) -print | sort
 printf 'Checksums: %s/SHA256SUMS\n' "$OUTPUT_DIR"

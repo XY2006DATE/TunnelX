@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -21,7 +22,6 @@ type TCPProxy struct {
 	manager          ProxyManager
 	tlsConfig        *tls.Config
 	mu               sync.RWMutex
-	running          bool
 	bytesIn          atomic.Int64
 	bytesOut         atomic.Int64
 	connections      atomic.Int64
@@ -41,7 +41,6 @@ func NewTCPProxy(name string, remotePort int, manager ProxyManager) *TCPProxy {
 		proxyType:  "tcp",
 		remotePort: remotePort,
 		manager:    manager,
-		running:    false,
 	}
 }
 
@@ -58,7 +57,6 @@ func NewHTTPSProxy(name string, remotePort int, manager ProxyManager, tlsConfig 
 		remotePort: remotePort,
 		manager:    manager,
 		tlsConfig:  tlsConfig.Clone(),
-		running:    false,
 	}, nil
 }
 
@@ -78,23 +76,23 @@ func (p *TCPProxy) Start(bindAddr string) error {
 
 	p.mu.Lock()
 	p.listener = listener
-	p.running = true
 	p.mu.Unlock()
 
 	util.Info("TCP proxy started: %s on %s", p.name, addr)
 
-	go p.acceptLoop()
+	go p.acceptLoop(listener)
 	return nil
 }
 
 // acceptLoop 接受连接循环
-func (p *TCPProxy) acceptLoop() {
-	for p.running {
-		conn, err := p.listener.Accept()
+func (p *TCPProxy) acceptLoop(listener net.Listener) {
+	for {
+		conn, err := listener.Accept()
 		if err != nil {
-			if p.running {
-				util.Error("TCP proxy accept error: %v", err)
+			if errors.Is(err, net.ErrClosed) {
+				return
 			}
+			util.Error("TCP proxy accept error: %v", err)
 			continue
 		}
 
@@ -204,7 +202,6 @@ func (p *TCPProxy) Stop() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	p.running = false
 	if p.listener != nil {
 		p.listener.Close()
 		util.Info("TCP proxy stopped: %s", p.name)

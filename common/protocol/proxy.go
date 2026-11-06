@@ -21,6 +21,7 @@ type NewProxyRequest struct {
 	ProxyName    string `json:"proxy_name"`
 	RemoteAddr   string `json:"remote_addr"`
 	ConnectionID string `json:"connection_id"` // 连接唯一ID
+	UDPFramed    bool   `json:"udp_framed,omitempty"`
 }
 
 // NewProxyResponse 新代理响应

@@ -14,12 +14,14 @@ import (
 	"github.com/XY2006DATE/TunnelX/common/protocol"
 	"github.com/XY2006DATE/TunnelX/common/transport"
 	"github.com/XY2006DATE/TunnelX/common/util"
+	"github.com/google/uuid"
 )
 
 type Connection struct {
 	config        *config.ClientConfig
 	conn          net.Conn
 	connected     bool
+	udpFramed     bool
 	reconnecting  bool
 	closing       bool
 	heartbeatStop chan struct{}
@@ -46,13 +48,12 @@ type ProxyTrafficSnapshot struct {
 func NewConnection(config *config.ClientConfig) *Connection {
 	clientID := config.ClientID
 	if clientID == "" {
-		clientID = fmt.Sprintf("client_%d", time.Now().Unix())
+		clientID = "client_" + uuid.NewString()
 	}
 	return &Connection{
-		config:        config,
-		heartbeatStop: make(chan struct{}),
-		clientID:      clientID,
-		traffic:       make(map[string]*ProxyTraffic),
+		config:   config,
+		clientID: clientID,
+		traffic:  make(map[string]*ProxyTraffic),
 	}
 }
 
@@ -83,6 +84,10 @@ func (c *Connection) TrafficSnapshot(name string) ProxyTrafficSnapshot {
 
 func (c *Connection) Connect() error {
 	c.mu.Lock()
+	if c.connected || c.closing {
+		c.mu.Unlock()
+		return nil
+	}
 
 	addr := net.JoinHostPort(c.config.ServerAddr, strconv.Itoa(c.config.ServerPort))
 	util.Info("Connecting to server: %s", addr)
@@ -94,6 +99,7 @@ func (c *Connection) Connect() error {
 	}
 
 	c.conn = conn
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 	c.connected = true
 	util.Info("Connected to server")
 
@@ -105,9 +111,13 @@ func (c *Connection) Connect() error {
 		c.mu.Unlock()
 		return fmt.Errorf("register: %w", err)
 	}
+	_ = conn.SetDeadline(time.Time{})
+	c.udpFramed = resp.UDPFramed
+	stop := make(chan struct{})
+	c.heartbeatStop = stop
 	onServerSync := c.onServerSync
 	c.mu.Unlock()
-	go c.startHeartbeat()
+	go c.startHeartbeat(conn, stop)
 	go c.readLoop(conn)
 	if onServerSync != nil {
 		onServerSync(resp.DeletedProxies)
@@ -171,10 +181,12 @@ func (c *Connection) dialServer() (net.Conn, error) {
 	}
 	tlsConfig.ServerName = c.config.ServerAddr
 	tlsConn := tls.Client(conn, tlsConfig)
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 	if err := tlsConn.Handshake(); err != nil {
 		conn.Close()
 		return nil, err
 	}
+	_ = conn.SetDeadline(time.Time{})
 	return tlsConn, nil
 }
 
@@ -197,7 +209,7 @@ func (c *Connection) register() (*protocol.RegisterResponse, error) {
 		ClientID: c.clientID,
 		Token:    c.config.Auth.Token,
 		Proxies:  proxies,
-		Version:  "1.0.0",
+		Version:  "0.2.0",
 	}
 
 	msg, _ := protocol.NewMessage(protocol.TypeRegister, req)
@@ -229,7 +241,7 @@ func (c *Connection) register() (*protocol.RegisterResponse, error) {
 	return &resp, nil
 }
 
-func (c *Connection) startHeartbeat() {
+func (c *Connection) startHeartbeat(conn net.Conn, stop <-chan struct{}) {
 	interval := time.Duration(c.config.Heartbeat.Interval) * time.Second
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -239,29 +251,29 @@ func (c *Connection) startHeartbeat() {
 	for {
 		select {
 		case <-ticker.C:
-			if err := c.sendHeartbeat(); err != nil {
+			req := &protocol.HeartbeatRequest{ClientID: c.clientID}
+			msg, _ := protocol.NewMessage(protocol.TypeHeartbeat, req)
+			if err := c.sendOnConnection(conn, msg); err != nil {
 				util.Error("Heartbeat failed: %v", err)
-				c.handleDisconnect()
+				c.handleDisconnect(conn)
 				return
 			}
-		case <-c.heartbeatStop:
+		case <-stop:
 			util.Info("Heartbeat stopped")
 			return
 		}
 	}
 }
 
-func (c *Connection) sendHeartbeat() error {
-	req := &protocol.HeartbeatRequest{
-		ClientID: c.clientID,
-	}
-
-	msg, _ := protocol.NewMessage(protocol.TypeHeartbeat, req)
-	return c.sendMessage(msg)
-}
-
 func (c *Connection) readLoop(conn net.Conn) {
+	timeout := time.Duration(c.config.Heartbeat.Timeout) * time.Second
+	if timeout <= time.Duration(c.config.Heartbeat.Interval)*time.Second {
+		timeout = 3 * time.Duration(c.config.Heartbeat.Interval) * time.Second
+	}
 	for {
+		if timeout > 0 {
+			_ = conn.SetReadDeadline(time.Now().Add(timeout))
+		}
 		msg, err := protocol.RecvMessage(conn)
 		if err != nil {
 			c.mu.RLock()
@@ -269,7 +281,7 @@ func (c *Connection) readLoop(conn net.Conn) {
 			c.mu.RUnlock()
 			if current {
 				util.Error("Control connection read failed: %v", err)
-				c.handleDisconnect()
+				c.handleDisconnect(conn)
 			}
 			return
 		}
@@ -288,14 +300,20 @@ func (c *Connection) readLoop(conn net.Conn) {
 }
 
 func (c *Connection) sendMessage(msg *protocol.Message) error {
-	c.sendMu.Lock()
-	defer c.sendMu.Unlock()
 	c.mu.RLock()
 	conn := c.conn
 	c.mu.RUnlock()
 	if conn == nil {
 		return fmt.Errorf("connection not established")
 	}
+	return c.sendOnConnection(conn, msg)
+}
+
+func (c *Connection) sendOnConnection(conn net.Conn, msg *protocol.Message) error {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	defer conn.SetWriteDeadline(time.Time{})
 	return protocol.SendMessage(conn, msg)
 }
 
@@ -310,12 +328,22 @@ func (c *Connection) SendProxyDelete(proxyName string) error {
 
 // HandleNewProxy creates a one-shot work connection and bridges it to the local service.
 func (c *Connection) HandleNewProxy(req *protocol.NewProxyRequest) error {
+	c.mu.RLock()
 	proxyConfig := c.config.GetProxyByName(req.ProxyName)
 	if proxyConfig == nil {
+		c.mu.RUnlock()
 		return fmt.Errorf("proxy not configured: %s", req.ProxyName)
 	}
 	localAddr := net.JoinHostPort(proxyConfig.LocalIP, strconv.Itoa(proxyConfig.LocalPort))
-	localConn, err := net.DialTimeout("tcp", localAddr, 10*time.Second)
+	network := "tcp"
+	if proxyConfig.Type == "udp" {
+		network = "udp"
+	}
+	c.mu.RUnlock()
+	if network == "udp" && !req.UDPFramed {
+		return fmt.Errorf("UDP forwarding requires a TunnelX 0.2.0 or newer server")
+	}
+	localConn, err := net.DialTimeout(network, localAddr, 10*time.Second)
 	if err != nil {
 		return fmt.Errorf("connect local service %s: %w", localAddr, err)
 	}
@@ -335,8 +363,45 @@ func (c *Connection) HandleNewProxy(req *protocol.NewProxyRequest) error {
 	traffic := c.trafficFor(req.ProxyName)
 	traffic.Connections.Add(1)
 	traffic.LastActive.Store(time.Now().UnixNano())
-	go bridgeConnections(localConn, workConn, traffic)
+	if network == "udp" {
+		go bridgeDatagrams(localConn, workConn, traffic)
+	} else {
+		go bridgeConnections(localConn, workConn, traffic)
+	}
 	return nil
+}
+
+func bridgeDatagrams(local, work net.Conn, traffic *ProxyTraffic) {
+	defer local.Close()
+	defer work.Close()
+	go func() {
+		defer work.Close()
+		buffer := make([]byte, protocol.MaxDatagramSize)
+		for {
+			n, err := local.Read(buffer)
+			if err != nil {
+				return
+			}
+			_ = work.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if err := protocol.WriteDatagram(work, buffer[:n]); err != nil {
+				return
+			}
+			traffic.BytesOut.Add(int64(n))
+			traffic.LastActive.Store(time.Now().UnixNano())
+		}
+	}()
+	buffer := make([]byte, protocol.MaxDatagramSize)
+	for {
+		data, err := protocol.ReadDatagram(work, buffer)
+		if err != nil {
+			return
+		}
+		if _, err := local.Write(data); err != nil {
+			return
+		}
+		traffic.BytesIn.Add(int64(len(data)))
+		traffic.LastActive.Store(time.Now().UnixNano())
+	}
 }
 
 func bridgeConnections(a, b net.Conn, traffic *ProxyTraffic) {
@@ -367,13 +432,15 @@ func closeWrite(conn net.Conn) {
 	}
 }
 
-func (c *Connection) handleDisconnect() {
+func (c *Connection) handleDisconnect(conn net.Conn) {
 	c.mu.Lock()
-	if c.closing {
+	if c.closing || c.conn != conn {
 		c.mu.Unlock()
 		return
 	}
 	c.connected = false
+	close(c.heartbeatStop)
+	c.heartbeatStop = nil
 	if c.conn != nil {
 		c.conn.Close()
 		c.conn = nil
@@ -381,10 +448,11 @@ func (c *Connection) handleDisconnect() {
 	c.mu.Unlock()
 
 	util.Warn("Connection lost, attempting to reconnect...")
-	go c.reconnect()
+	go c.ConnectWithRetry()
 }
 
-func (c *Connection) reconnect() {
+// ConnectWithRetry restores an approved session even if its server is offline at startup.
+func (c *Connection) ConnectWithRetry() {
 	c.mu.Lock()
 	if c.reconnecting {
 		c.mu.Unlock()
@@ -396,7 +464,11 @@ func (c *Connection) reconnect() {
 	defer func() {
 		c.mu.Lock()
 		c.reconnecting = false
+		disconnected := !c.connected && !c.closing
 		c.mu.Unlock()
+		if disconnected {
+			go c.ConnectWithRetry()
+		}
 	}()
 
 	backoff := 1 * time.Second
@@ -432,13 +504,17 @@ func (c *Connection) Close() {
 	defer c.mu.Unlock()
 
 	c.closing = true
-	close(c.heartbeatStop)
+	if c.heartbeatStop != nil {
+		close(c.heartbeatStop)
+		c.heartbeatStop = nil
+	}
 
 	if c.conn != nil {
 		req := &protocol.CloseRequest{
 			Reason: "client shutdown",
 		}
 		msg, _ := protocol.NewMessage(protocol.TypeClose, req)
+		_ = c.conn.SetWriteDeadline(time.Now().Add(time.Second))
 		protocol.SendMessage(c.conn, msg)
 
 		c.conn.Close()
@@ -510,4 +586,10 @@ func (c *Connection) IsConnected() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.connected
+}
+
+func (c *Connection) SupportsUDP() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.connected && c.udpFramed
 }

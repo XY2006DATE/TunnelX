@@ -721,7 +721,7 @@ func (d *Dashboard) handleAPIApproveRequest(w http.ResponseWriter, r *http.Reque
 	util.Info("[DEBUG] Request approved: ClientID=%s, ProxyName=%s, RemotePort=%d", proxyReq.ClientID, proxyReq.ProxyName, proxyReq.RemotePort)
 
 	proxyConfig := &protocol.ProxyConfig{
-		Name: proxyReq.ProxyName, Type: proxyReq.ProxyType, LocalPort: proxyReq.LocalPort, RemotePort: proxyReq.RemotePort,
+		Name: proxyReq.ProxyName, Type: proxyReq.ProxyType, LocalIP: proxyReq.LocalIP, LocalPort: proxyReq.LocalPort, RemotePort: proxyReq.RemotePort,
 	}
 	util.Info("[DEBUG] Setting up proxy: %+v", proxyConfig)
 

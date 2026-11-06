@@ -1,28 +1,61 @@
-use reqwest::Client;
+use reqwest::{redirect::Policy, Client, Method};
 use serde_json::Value;
-use std::sync::Mutex;
-use tauri::{path::BaseDirectory, Manager};
+use std::{sync::Mutex, time::Duration};
+#[cfg(target_os = "macos")]
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::TrayIconBuilder,
+    AppHandle,
+};
+use tauri::{path::BaseDirectory, Manager, RunEvent};
 use tauri_plugin_shell::{
     process::{CommandChild, CommandEvent},
     ShellExt,
 };
+
 struct ApiClient(Client);
-struct ClientSidecar(Mutex<Option<CommandChild>>);
+struct ClientSidecar {
+    child: Mutex<Option<CommandChild>>,
+    dashboard: Mutex<Result<Option<u16>, String>>,
+}
+
+#[tauri::command]
+fn dashboard_port(sidecar: tauri::State<'_, ClientSidecar>) -> Result<Option<u16>, String> {
+    sidecar.dashboard.lock().unwrap().clone()
+}
 
 #[tauri::command]
 async fn api_request(
     client: tauri::State<'_, ApiClient>,
-    base_url: String,
+    sidecar: tauri::State<'_, ClientSidecar>,
     path: String,
     method: String,
     body: Option<Value>,
 ) -> Result<Value, String> {
-    let url = format!("{}{}", base_url.trim_end_matches('/'), path);
-    let mut request = if method == "POST" {
-        client.0.post(url)
-    } else {
-        client.0.get(url)
+    let port = dashboard_port(sidecar)?.ok_or("TunnelX is starting")?;
+    if !matches!(
+        path.as_str(),
+        "/api/setup-status"
+            | "/api/setup"
+            | "/login"
+            | "/api/stats"
+            | "/api/proxies"
+            | "/api/requests"
+            | "/api/request-proxy"
+            | "/api/delete-proxy"
+            | "/api/runtime-config"
+            | "/api/password"
+    ) {
+        return Err("Unsupported dashboard endpoint".into());
+    }
+    let method = match method.as_str() {
+        "GET" => Method::GET,
+        "POST" => Method::POST,
+        _ => return Err("Unsupported dashboard method".into()),
     };
+    let mut request = client
+        .0
+        .request(method, format!("http://127.0.0.1:{port}{path}"));
     if let Some(payload) = body {
         request = request.json(&payload);
     }
@@ -33,16 +66,29 @@ async fn api_request(
         return Err(if text.is_empty() {
             status.to_string()
         } else {
-            text
+            text.trim().to_owned()
         });
     }
     serde_json::from_str(&text).map_err(|e| format!("Invalid API response: {e}"))
+}
+
+#[cfg(target_os = "macos")]
+fn show_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = app.set_dock_visibility(true);
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let client = Client::builder()
         .cookie_store(true)
+        .no_proxy()
+        .redirect(Policy::none())
+        .timeout(Duration::from_secs(35))
         .build()
         .expect("http client");
     tauri::Builder::default()
@@ -50,6 +96,29 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            {
+                let show = MenuItem::with_id(app, "show", "Open TunnelX", true, None::<&str>)?;
+                let hide = MenuItem::with_id(app, "hide", "Hide to Menu Bar", true, None::<&str>)?;
+                let quit = MenuItem::with_id(app, "quit", "Quit TunnelX", true, None::<&str>)?;
+                let menu = Menu::with_items(app, &[&show, &hide, &quit])?;
+                TrayIconBuilder::with_id("tunnelx")
+                    .icon(app.default_window_icon().expect("app icon").clone())
+                    .tooltip("TunnelX")
+                    .menu(&menu)
+                    .on_menu_event(|app, event| match event.id().as_ref() {
+                        "show" => show_main_window(app),
+                        "hide" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.close();
+                            }
+                        }
+                        "quit" => app.exit(0),
+                        _ => {}
+                    })
+                    .build(app)?;
+            }
+
             let bundled_config = app.path().resolve("client.yaml", BaseDirectory::Resource)?;
             let config_dir = app.path().app_config_dir()?;
             std::fs::create_dir_all(&config_dir)?;
@@ -60,37 +129,73 @@ pub fn run() {
             let (mut events, child) = app
                 .shell()
                 .sidecar("tunnelx-client")?
-                .args([config.to_string_lossy().to_string()])
+                .args([config.as_os_str(), std::ffi::OsStr::new("--desktop")])
                 .current_dir(&config_dir)
                 .spawn()?;
+            app.manage(ClientSidecar {
+                child: Mutex::new(Some(child)),
+                dashboard: Mutex::new(Ok(None)),
+            });
+            let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
+                let mut startup_error = None;
                 while let Some(event) = events.recv().await {
+                    let state = handle.state::<ClientSidecar>();
                     match event {
                         CommandEvent::Stdout(line) => {
-                            println!("[client] {}", String::from_utf8_lossy(&line))
+                            let line = String::from_utf8_lossy(&line);
+                            if let Some(port) = line
+                                .trim()
+                                .strip_prefix("TUNNELX_DASHBOARD_READY ")
+                                .and_then(|port| port.parse::<u16>().ok())
+                                .filter(|port| *port > 0)
+                            {
+                                *state.dashboard.lock().unwrap() = Ok(Some(port));
+                            } else {
+                                println!("[client] {line}");
+                            }
                         }
                         CommandEvent::Stderr(line) => {
-                            eprintln!("[client] {}", String::from_utf8_lossy(&line))
+                            let line = String::from_utf8_lossy(&line);
+                            eprintln!("[client] {line}");
+                            startup_error = Some(line.trim().to_owned());
                         }
+                        CommandEvent::Terminated(_) => break,
                         _ => {}
                     }
                 }
+                let state = handle.state::<ClientSidecar>();
+                *state.dashboard.lock().unwrap() = Err(startup_error
+                    .unwrap_or_else(|| "TunnelX client stopped. Quit and reopen the app.".into()));
+                state.child.lock().unwrap().take();
             });
-            app.manage(ClientSidecar(Mutex::new(Some(child))));
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::Destroyed = event {
-                if let Some(state) = window.try_state::<ClientSidecar>() {
-                    if let Ok(mut child) = state.0.lock() {
-                        if let Some(process) = child.take() {
-                            let _ = process.kill();
-                        }
+            #[cfg(target_os = "macos")]
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                if window.hide().is_ok() {
+                    let _ = window.app_handle().set_dock_visibility(false);
+                }
+            }
+
+            #[cfg(not(target_os = "macos"))]
+            let _ = (window, event);
+        })
+        .invoke_handler(tauri::generate_handler![api_request, dashboard_port])
+        .build(tauri::generate_context!())
+        .expect("error while building TunnelX")
+        .run(|app, event| match event {
+            #[cfg(target_os = "macos")]
+            RunEvent::Reopen { .. } => show_main_window(app),
+            RunEvent::Exit => {
+                if let Some(state) = app.try_state::<ClientSidecar>() {
+                    if let Some(process) = state.child.lock().unwrap().take() {
+                        let _ = process.kill();
                     }
                 }
             }
-        })
-        .invoke_handler(tauri::generate_handler![api_request])
-        .run(tauri::generate_context!())
-        .expect("error while running TunnelX");
+            _ => {}
+        });
 }

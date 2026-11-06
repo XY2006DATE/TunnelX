@@ -17,11 +17,13 @@ make build-go
 
 1. 启动客户端并访问 `http://客户端地址:7101`。
 2. 首次访问设置至少 8 位的管理密码。
-3. 填写完整服务地址、认证 Token、本地端口和代理类型。完整地址直接填写 `https://tunnel.example.com:7100/`，客户端会自动解析端口并启用 TLS，无需另填控制端口。
+3. 填写完整服务地址、认证 Token、目标设备地址和端口，以及代理类型。例如 `https://tunnel.example.com:7100/` 会自动解析控制端口并启用 TLS。目标是本机时使用 `127.0.0.1`；目标是其他设备时，填写客户端能访问的 IP 或主机名，如 `192.168.1.20`。端口单独填写。
 4. 提交申请后，在服务端 Dashboard 中审批并指定公网端口。
 5. 审批成功后，代理会写入客户端 YAML；重启客户端后自动恢复。
 
-客户端 Dashboard 当前支持申请 HTTPS、TCP 和 UDP 代理。它默认监听 `0.0.0.0`，应使用主机防火墙限制访问来源。
+客户端 Dashboard 支持同时申请多个目标的 HTTPS、TCP 和 UDP 代理。命令行版 Dashboard 默认监听 `0.0.0.0`，应使用主机防火墙限制访问来源；桌面客户端的管理界面只在本机监听。
+
+UDP 保留每个数据报的边界，要求客户端和服务端都升级至 0.2.0 或更新版本。更新服务端可在对应版本的源码目录执行 `make build-go`，再用新生成的 `bin/tunnelx-server` 和原有配置启动。
 
 ## 配置
 
@@ -55,7 +57,7 @@ proxies: []
 | `tls.enable` | 是否使用 TLS 连接服务端 |
 | `tls.ca_file` | 用于验证服务端证书的 CA 文件 |
 | `heartbeat.interval` | 心跳发送间隔秒数 |
-| `heartbeat.timeout` | 客户端侧保留的超时配置 |
+| `heartbeat.timeout` | 控制连接无响应多久后重连（秒）；如小于等于心跳间隔，则使用三倍心跳间隔 |
 | `dashboard.port` | 客户端 Dashboard 监听端口 |
 | `dashboard.password_file` | Dashboard 密码哈希文件 |
 | `proxies` | 已批准或预配置的代理列表 |
@@ -163,21 +165,15 @@ tls:
 
 ## 桌面应用
 
-客户端桌面壳位于 `client/clientdashboard`。构建当前操作系统的安装包：
+从 [GitHub Releases](https://github.com/XY2006DATE/TunnelX/releases) 下载对应架构的 macOS DMG。开发者可在仓库根目录构建：
 
 ```bash
-./package.sh --desktop
+./build-macos.sh --client-only --arch native
 ```
 
-也可以单独构建：
+点击黄色最小化按钮可把窗口收到 Dock；点击红色关闭按钮或按 `⌘W` 会把窗口收到菜单栏。隧道在两种情况下都会继续转发。要恢复窗口，点菜单栏图标并选 `Open TunnelX`；要停止隧道，选 `Quit TunnelX` 或在窗口打开时按 `⌘Q`。Mac 睡眠时无法持续转发，唤醒后客户端会重连。
 
-```bash
-cd client/clientdashboard
-npm ci
-npm run tauri build
-```
-
-Tauri 会把客户端 Go 程序作为 sidecar 启动，并把首次使用的配置复制到系统应用配置目录。
+Tauri 会随 App 启动 Go 客户端。配置保存在 `~/Library/Application Support/cn.xcloudy.tunnelx.client/`，升级时会沿用已有配置。首次转发到局域网设备时，如 macOS 提示访问本地网络，请允许；也可在“系统设置 → 隐私与安全性 → 本地网络”管理权限。
 
 ## 常见问题
 

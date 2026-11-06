@@ -11,6 +11,7 @@ TunnelX 是一个使用 Go 编写的内网穿透工具。它通过部署在公�
 - 基于 `Host` 的 HTTP 虚拟主机转发
 - Token 客户端认证和可选 TLS 传输
 - 客户端断线重连、心跳检测和多服务端会话
+- 一台客户端可同时转发本机和局域网内多台设备的服务
 - 服务端审批代理申请、端口池分配和流量统计
 - 服务端、客户端 Web Dashboard 及 Tauri 桌面壳
 - Linux、macOS、Windows 的 amd64/arm64 CLI 发布包
@@ -130,6 +131,19 @@ proxies:
 HTTP 虚拟主机固定监听服务端的 80 端口，因此需要相应权限、防火墙规则和指向服务端的 DNS 记录。
 
 ## 安装包
+
+在 [GitHub Releases](https://github.com/XY2006DATE/TunnelX/releases) 下载 macOS 客户端：Apple 芯片选 `arm64`，Intel 芯片选 `x86_64`。把 TunnelX 拖进“应用程序”后打开。关闭窗口会把 TunnelX 收到菜单栏，现有隧道会继续运行；从菜单栏选择 `Open TunnelX` 可恢复窗口，选择 `Quit TunnelX` 会停止隧道并退出。
+
+申请代理时，目标设备填写本机的 `127.0.0.1`，或 NAS、另一台电脑等设备的局域网 IP/主机名。服务端审批后，Windows、Linux、macOS、iOS 和 Android 上的应用可通过分配到的公网地址使用对应的服务；访问端使用原有协议即可。
+
+只构建 macOS 客户端：
+
+```bash
+./build-macos.sh --client-only --arch arm64
+./build-macos.sh --client-only --arch x86_64
+```
+
+客户端的 `.app`、`.dmg` 和 SHA-256 校验文件在 `dist/macos-client-<架构>/`。
 
 在 macOS 上可以一次构建 Client/Server 的 `.app` 和 `.dmg`，共四个产物：
 

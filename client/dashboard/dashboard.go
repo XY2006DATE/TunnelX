@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -67,6 +68,7 @@ type ProxyStat struct {
 	ServerPort  int       `json:"server_port"`
 	Name        string    `json:"name"`
 	Type        string    `json:"type"`
+	LocalIP     string    `json:"local_ip"`
 	LocalPort   int       `json:"local_port"`
 	RemotePort  int       `json:"remote_port"`
 	BytesIn     int64     `json:"bytes_in"`
@@ -93,14 +95,14 @@ func NewClientDashboard(port int, passwordFile string, onUpdatePort func(int) er
 	return d
 }
 
-// Start 启动客户端Dashboard
-func (d *ClientDashboard) Start(bindAddr string) error {
+// Listen binds the management API before reporting it ready.
+func (d *ClientDashboard) Listen(bindAddr string) (net.Listener, error) {
 	mux := http.NewServeMux()
 
 	// React 编译产物与 API 使用同一个 Dashboard 端口。
 	webRoot, err := fs.Sub(webFS, "web")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	mux.Handle("/", http.FileServer(http.FS(webRoot)))
 
@@ -118,6 +120,10 @@ func (d *ClientDashboard) Start(bindAddr string) error {
 	mux.HandleFunc("/api/password", d.authMiddleware(d.handlePasswordChange))
 
 	addr := fmt.Sprintf("%s:%d", bindAddr, d.port)
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
 	d.server = &http.Server{
 		Addr:    addr,
 		Handler: mux,
@@ -125,7 +131,11 @@ func (d *ClientDashboard) Start(bindAddr string) error {
 
 	util.Info("Client Dashboard started on http://%s", addr)
 
-	return d.server.ListenAndServe()
+	return listener, nil
+}
+
+func (d *ClientDashboard) Serve(listener net.Listener) error {
+	return d.server.Serve(listener)
 }
 
 func (d *ClientDashboard) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
@@ -370,10 +380,16 @@ func (d *ClientDashboard) handleAPIRequestProxy(w http.ResponseWriter, r *http.R
 		http.Error(w, "Invalid port", http.StatusBadRequest)
 		return
 	}
-	if req.ServerAddr == "" || req.ServerPort <= 0 || req.ServerPort > 65535 || req.Token == "" || req.LocalIP == "" {
-		http.Error(w, "Server address, control port, token and local address are required", http.StatusBadRequest)
+	if req.ServerAddr == "" || req.ServerPort <= 0 || req.ServerPort > 65535 || req.Token == "" {
+		http.Error(w, "Server address, control port and token are required", http.StatusBadRequest)
 		return
 	}
+	localIP, err := normalizeTargetHost(req.LocalIP)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	req.LocalIP = localIP
 
 	if req.ProxyType != "tcp" && req.ProxyType != "udp" && req.ProxyType != "https" {
 		http.Error(w, "Invalid proxy type", http.StatusBadRequest)
@@ -393,6 +409,36 @@ func (d *ClientDashboard) handleAPIRequestProxy(w http.ResponseWriter, r *http.R
 		"success": true,
 		"message": "Proxy request submitted",
 	})
+}
+
+func normalizeTargetHost(raw string) (string, error) {
+	host := strings.TrimSpace(raw)
+	if host == "" {
+		return "127.0.0.1", nil
+	}
+	ip := host
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		ip = host[1 : len(host)-1]
+	}
+	if parsed := net.ParseIP(ip); parsed != nil && (!strings.HasPrefix(host, "[") || strings.Contains(ip, ":")) {
+		return parsed.String(), nil
+	}
+	valid := len(host) <= 253
+	for _, label := range strings.Split(strings.TrimSuffix(host, "."), ".") {
+		if len(label) == 0 || len(label) > 63 || strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+			valid = false
+			break
+		}
+		for _, c := range strings.ToLower(label) {
+			if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+				valid = false
+			}
+		}
+	}
+	if !valid {
+		return "", fmt.Errorf("target must be an IP address or hostname without a URL or port")
+	}
+	return host, nil
 }
 
 // handleAPIRequests 获取请求列表
