@@ -3,13 +3,19 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/XY2006DATE/TunnelX/common/transport"
 	"os"
+	"path"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
 // ServerConfig 服务端配置
 type ServerConfig struct {
+	WebSocket struct {
+		Path string `yaml:"path" json:"path"`
+	} `yaml:"websocket" json:"websocket"`
 	Server struct {
 		BindAddr string `yaml:"bind_addr" json:"bind_addr"`
 		BindPort int    `yaml:"bind_port" json:"bind_port"`
@@ -90,6 +96,12 @@ func LoadServerConfig(configFile string) (*ServerConfig, error) {
 	}
 
 	// 验证
+	if config.WebSocket.Path == "" {
+		config.WebSocket.Path = transport.DefaultWebSocketPath
+	}
+	if !strings.HasPrefix(config.WebSocket.Path, "/") || path.Clean(config.WebSocket.Path) != config.WebSocket.Path || config.WebSocket.Path == "/" || strings.ContainsAny(config.WebSocket.Path, "?# \\ ") {
+		return nil, fmt.Errorf("websocket.path must be a non-root absolute URL path, for example /proxy")
+	}
 	if config.Server.BindPort <= 0 || config.Server.BindPort > 65535 {
 		return nil, fmt.Errorf("invalid bind_port: %d", config.Server.BindPort)
 	}

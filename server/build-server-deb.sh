@@ -8,7 +8,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # 配置变量
-VERSION="0.1.0"
+VERSION="0.2.0"
 ARCH="amd64"
 PACKAGE_NAME="tunnelx-server"
 BUILD_DIR="$(pwd)/package/${PACKAGE_NAME}"

@@ -1,345 +1,147 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REQUESTED_ARCH="native"
-
-usage() {
-  cat <<'EOF'
-Build the TunnelX Client and Server Debian packages.
-
-Usage:
-  ./build-deb.sh [--arch native|amd64|arm64]
-
-Outputs (two artifacts):
-  TunnelX-Client-<version>-linux-<arch>.deb
-  TunnelX-Server-<version>-linux-<arch>.deb
-
-Examples:
-  ./build-deb.sh
-  ./build-deb.sh --arch amd64
-  ./build-deb.sh --arch arm64
-EOF
-}
-
-fail() {
-  printf 'error: %s\n' "$*" >&2
-  exit 1
-}
-
-need_command() {
-  command -v "$1" >/dev/null 2>&1 || fail "required command not found: $1"
-}
-
-while (($# > 0)); do
+ARCH=native
+SKIP_WEB=false
+while (($#)); do
   case "$1" in
-    --arch)
-      (($# >= 2)) || fail "--arch requires a value"
-      REQUESTED_ARCH="$2"
-      shift 2
-      ;;
+    --arch) ARCH="${2:?--arch requires a value}"; shift 2 ;;
+    --skip-web) SKIP_WEB=true; shift ;;
     -h|--help)
-      usage
-      exit 0
-      ;;
-    *)
-      fail "unknown option: $1"
-      ;;
+      echo 'Usage: ./build-deb.sh [--arch native|amd64|arm64] [--skip-web]'
+      echo 'Builds Client and Server packages with desktop and Web Dashboards.'
+      exit 0 ;;
+    *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
 done
-
-case "$REQUESTED_ARCH" in
-  native)
-    case "$(uname -m)" in
-      x86_64)
-        GO_ARCH="amd64"
-        DEB_ARCH="amd64"
-        ARTIFACT_ARCH="amd64"
-        ;;
-      aarch64|arm64)
-        GO_ARCH="arm64"
-        DEB_ARCH="arm64"
-        ARTIFACT_ARCH="arm64"
-        ;;
-      *) fail "unsupported native architecture: $(uname -m)" ;;
-    esac
-    ;;
-  amd64|x86_64)
-    GO_ARCH="amd64"
-    DEB_ARCH="amd64"
-    ARTIFACT_ARCH="amd64"
-    ;;
-  arm64|aarch64)
-    GO_ARCH="arm64"
-    DEB_ARCH="arm64"
-    ARTIFACT_ARCH="arm64"
-    ;;
-  *) fail "unsupported architecture: $REQUESTED_ARCH" ;;
+[[ "$ARCH" != native ]] || ARCH="$(uname -m)"
+case "$ARCH" in
+  amd64|x86_64) ARCH=amd64 ;;
+  arm64|aarch64) ARCH=arm64 ;;
+  *) echo "Unsupported architecture: $ARCH" >&2; exit 1 ;;
 esac
-
-need_command go
-need_command node
-need_command npm
-need_command dpkg-deb
-need_command shasum
-
+for command in go node dpkg-deb sha256sum; do command -v "$command" >/dev/null; done
 cd "$ROOT_DIR"
-
-# Extract version from package.json or tauri config
-if [[ -f "./client/clientdashboard/src-tauri/tauri.conf.json" ]]; then
-  CLIENT_VERSION="$(node -p "require('./client/clientdashboard/src-tauri/tauri.conf.json').version")"
-  SERVER_VERSION="$(node -p "require('./server/serverdashboard/src-tauri/tauri.conf.json').version")"
-elif [[ -f "./client/package.json" ]]; then
-  CLIENT_VERSION="$(node -p "require('./client/package.json').version || '1.0.0'")"
-  SERVER_VERSION="$(node -p "require('./server/package.json').version || '1.0.0'")"
-else
-  CLIENT_VERSION="1.0.0"
-  SERVER_VERSION="1.0.0"
-fi
-
-[[ -n "$CLIENT_VERSION" ]] || fail "client version is empty"
-[[ "$CLIENT_VERSION" == "$SERVER_VERSION" ]] || fail "client and server versions differ"
-VERSION="$CLIENT_VERSION"
-
-OUTPUT_DIR="$ROOT_DIR/dist/deb-$ARTIFACT_ARCH"
-case "$OUTPUT_DIR" in
-  "$ROOT_DIR"/dist/deb-amd64|"$ROOT_DIR"/dist/deb-arm64) ;;
-  *) fail "refusing unsafe output directory: $OUTPUT_DIR" ;;
-esac
-
-rm -rf "$OUTPUT_DIR"
+OUTPUT_DIR="$ROOT_DIR/dist/deb-$ARCH"
 mkdir -p "$OUTPUT_DIR"
-
-build_component() {
-  local component="$1"
-  local display_name="$2"
-  local package_name="tunnelx-$component"
-  local deb_name="TunnelX-$display_name-${VERSION}-linux-${ARTIFACT_ARCH}.deb"
-
-  printf '\n[%s] Building Go binary for linux/%s...\n' "$display_name" "$GO_ARCH"
-
-  local binary_name="tunnelx-$component"
-  CGO_ENABLED=0 GOOS=linux GOARCH="$GO_ARCH" \
-    go build -trimpath -ldflags="-s -w" -o "$OUTPUT_DIR/$binary_name" "./$component"
-
-  # Create deb package structure
-  local pkg_dir="$OUTPUT_DIR/${package_name}_${VERSION}_${DEB_ARCH}"
-  rm -rf "$pkg_dir"
-  mkdir -p "$pkg_dir/DEBIAN"
-  mkdir -p "$pkg_dir/opt/tunnelx/bin"
-  mkdir -p "$pkg_dir/opt/tunnelx/config"
-  mkdir -p "$pkg_dir/opt/tunnelx/logs"
-  mkdir -p "$pkg_dir/etc/systemd/system"
-
-  # Copy binary
-  cp "$OUTPUT_DIR/$binary_name" "$pkg_dir/opt/tunnelx/bin/"
-  chmod 755 "$pkg_dir/opt/tunnelx/bin/$binary_name"
-
-  # Copy default config file
-  if [[ -f "$ROOT_DIR/$component/${component}.yaml" ]]; then
-    cp "$ROOT_DIR/$component/${component}.yaml" "$pkg_dir/opt/tunnelx/config/${component}.yaml.default"
+STAGING="$(mktemp -d)"
+trap 'rm -rf "$STAGING"' EXIT
+ARTIFACTS=()
+for component in client server; do
+  dashboard="$ROOT_DIR/$component/${component}dashboard"
+  version="$(node -p "require('$dashboard/src-tauri/tauri.conf.json').version")"
+  if [[ "$SKIP_WEB" != true ]]; then
+    (cd "$dashboard" && npm ci --no-audit --no-fund && npm run build)
   fi
-
-  # Create control file
-  cat > "$pkg_dir/DEBIAN/control" <<CTRL
-Package: $package_name
-Version: $VERSION
+  display="${component^}"
+  package="tunnelx-$component"
+  launcher="$package-gui"
+  state="/var/lib/$package"
+  pkg="$STAGING/$package"
+  mkdir -p "$pkg/DEBIAN" "$pkg/usr/lib/$package" "$pkg/usr/lib/systemd/system" \
+    "$pkg/usr/bin" "$pkg/usr/share/applications" "$pkg/usr/share/icons/hicolor/scalable/apps"
+  CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" go build -trimpath -ldflags='-s -w' \
+    -o "$pkg/usr/lib/$package/$package" "./$component"
+  cp "$component/$component.yaml" "$pkg/usr/lib/$package/$component.yaml.default"
+  chmod 755 "$pkg/usr/lib/$package/$package"
+  cat > "$pkg/DEBIAN/control" <<EOF
+Package: $package
+Version: $version
 Section: net
 Priority: optional
-Architecture: $DEB_ARCH
+Architecture: $ARCH
 Maintainer: TunnelX Team <support@tunnelx.io>
-Description: TunnelX $display_name
- TunnelX $display_name component for secure tunneling.
-Depends: systemd
-CTRL
-
-  # Create postinst script
-  cat > "$pkg_dir/DEBIAN/postinst" <<'POSTINST'
-#!/bin/bash
+Depends: systemd, passwd, python3, python3-gi, gir1.2-gtk-3.0, gir1.2-webkit2-4.1
+Conflicts: $launcher
+Replaces: $launcher
+Description: TunnelX $display with desktop and Web Dashboards
+ Secure tunneling with a desktop application and browser-based management.
+EOF
+  cat > "$pkg/DEBIAN/postinst" <<EOF
+#!/bin/sh
 set -e
-
-INSTALL_DIR="/opt/tunnelx"
-CONFIG_DIR="$INSTALL_DIR/config"
-LOGS_DIR="$INSTALL_DIR/logs"
-PASSWORD_FILE="$CONFIG_DIR/.password"
-COMPONENT="COMPONENT"
-CONFIG_FILE="$CONFIG_DIR/${COMPONENT}.yaml"
-DEFAULT_CONFIG="$CONFIG_DIR/${COMPONENT}.yaml.default"
-
-# Create tunnelx user if not exists
-if ! id -u tunnelx >/dev/null 2>&1; then
-    useradd --system --no-create-home --shell /bin/false tunnelx || true
+if [ "\$1" = configure ]; then
+  if ! getent passwd $package >/dev/null; then
+    useradd --system --user-group --home-dir $state --no-create-home --shell /usr/sbin/nologin $package
+  fi
+  install -d -m 0750 -o $package -g $package $state
+  if [ ! -f $state/$component.yaml ]; then
+    install -m 0640 -o $package -g $package /usr/lib/$package/$component.yaml.default $state/$component.yaml
+  fi
+  if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload
+    if systemctl is-active --quiet $package.service; then systemctl try-restart $package.service; fi
+  fi
+  echo 'Start with: systemctl enable --now $package'
+  echo 'Set the Dashboard administrator password from the desktop app or browser on first use.'
 fi
-
-# Set directory ownership and permissions
-chown -R tunnelx:tunnelx "$INSTALL_DIR"
-chmod 755 "$INSTALL_DIR"
-chmod 755 "$INSTALL_DIR/bin"
-chmod 755 "$INSTALL_DIR/bin"/*
-chmod 750 "$CONFIG_DIR"
-chmod 770 "$LOGS_DIR"
-
-# Create config file from default if not exists
-if [[ ! -f "$CONFIG_FILE" ]] && [[ -f "$DEFAULT_CONFIG" ]]; then
-    cp "$DEFAULT_CONFIG" "$CONFIG_FILE"
-    chown tunnelx:tunnelx "$CONFIG_FILE"
-    chmod 640 "$CONFIG_FILE"
-    echo "Created default config: $CONFIG_FILE"
-fi
-
-# Prompt for password on first installation
-if [[ "$1" == "configure" ]] && [[ ! -f "$PASSWORD_FILE" ]]; then
-    echo "==============================================="
-    echo " TunnelX First-Time Setup"
-    echo "==============================================="
-    echo ""
-
-    # Try to set password interactively
-    if [[ -t 0 ]]; then
-        while true; do
-            read -s -p "Set admin password: " password1
-            echo ""
-            read -s -p "Confirm password: " password2
-            echo ""
-
-            if [[ -z "$password1" ]]; then
-                echo "Password cannot be empty. Please try again."
-                continue
-            fi
-
-            if [[ "$password1" == "$password2" ]]; then
-                echo -n "$password1" | sha256sum | awk '{print $1}' > "$PASSWORD_FILE"
-                chmod 600 "$PASSWORD_FILE"
-                chown tunnelx:tunnelx "$PASSWORD_FILE"
-                echo "Password set successfully!"
-                break
-            else
-                echo "Passwords do not match. Please try again."
-            fi
-        done
-    else
-        # Non-interactive installation: generate random password
-        RANDOM_PASSWORD="$(openssl rand -base64 32 | tr -d '/+=' | head -c 24)"
-        echo -n "$RANDOM_PASSWORD" | sha256sum | awk '{print $1}' > "$PASSWORD_FILE"
-        chmod 600 "$PASSWORD_FILE"
-        chown tunnelx:tunnelx "$PASSWORD_FILE"
-        echo "Generated random admin password: $RANDOM_PASSWORD"
-        echo "Please save this password securely!"
-        echo "Password hash stored in: $PASSWORD_FILE"
-    fi
-
-    echo ""
-    echo "Setup complete!"
-    echo "==============================================="
-fi
-
-# Reload systemd if service file exists
-if [[ -f "/etc/systemd/system/tunnelx-COMPONENT.service" ]]; then
-    systemctl daemon-reload || true
-    echo "To enable and start the service, run:"
-    echo "  sudo systemctl enable tunnelx-COMPONENT"
-    echo "  sudo systemctl start tunnelx-COMPONENT"
-fi
-
-exit 0
-POSTINST
-
-  # Replace COMPONENT placeholder
-  sed -i "s/COMPONENT/$component/g" "$pkg_dir/DEBIAN/postinst"
-  chmod 755 "$pkg_dir/DEBIAN/postinst"
-
-  # Create prerm script
-  cat > "$pkg_dir/DEBIAN/prerm" <<'PRERM'
-#!/bin/bash
+EOF
+  cat > "$pkg/DEBIAN/prerm" <<EOF
+#!/bin/sh
 set -e
-
-if [[ "$1" == "remove" ]]; then
-    if systemctl is-active --quiet tunnelx-COMPONENT 2>/dev/null; then
-        systemctl stop tunnelx-COMPONENT || true
-    fi
-    if systemctl is-enabled --quiet tunnelx-COMPONENT 2>/dev/null; then
-        systemctl disable tunnelx-COMPONENT || true
-    fi
+if [ "\$1" = remove ] && [ -d /run/systemd/system ]; then
+  systemctl stop $package.service || true
+  systemctl disable $package.service || true
 fi
-
-exit 0
-PRERM
-
-  sed -i "s/COMPONENT/$component/g" "$pkg_dir/DEBIAN/prerm"
-  chmod 755 "$pkg_dir/DEBIAN/prerm"
-
-  # Create postrm script
-  cat > "$pkg_dir/DEBIAN/postrm" <<'POSTRM'
-#!/bin/bash
+EOF
+  cat > "$pkg/DEBIAN/postrm" <<EOF
+#!/bin/sh
 set -e
-
-if [[ "$1" == "purge" ]]; then
-    rm -rf /opt/tunnelx
-    if id -u tunnelx >/dev/null 2>&1; then
-        userdel tunnelx || true
-    fi
-    systemctl daemon-reload || true
+if [ "\$1" = purge ]; then
+  rm -rf $state
+  if getent passwd $package >/dev/null; then userdel $package; fi
 fi
-
-exit 0
-POSTRM
-
-  chmod 755 "$pkg_dir/DEBIAN/postrm"
-
-  # Create systemd service file
-  cat > "$pkg_dir/etc/systemd/system/tunnelx-$component.service" <<SERVICE
+if [ -d /run/systemd/system ]; then systemctl daemon-reload; fi
+EOF
+  chmod 755 "$pkg/DEBIAN/"{postinst,prerm,postrm}
+  cat > "$pkg/usr/lib/systemd/system/$package.service" <<EOF
 [Unit]
-Description=TunnelX $display_name Service
-After=network.target
+Description=TunnelX $display Service
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-User=tunnelx
-Group=tunnelx
-WorkingDirectory=/opt/tunnelx/config
-ExecStart=/opt/tunnelx/bin/$binary_name
+User=$package
+Group=$package
+StateDirectory=$package
+StateDirectoryMode=0750
+WorkingDirectory=$state
+ExecStart=/usr/lib/$package/$package $state/$component.yaml
 Restart=on-failure
 RestartSec=5s
-StandardOutput=append:/opt/tunnelx/logs/$component.log
-StandardError=append:/opt/tunnelx/logs/$component.err.log
-
-# Security settings
+UMask=0027
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/opt/tunnelx/config /opt/tunnelx/logs
+ReadWritePaths=$state
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
 [Install]
 WantedBy=multi-user.target
-SERVICE
-
-  # Build deb package
-  printf '[%s] Building .deb package...\n' "$display_name"
-  dpkg-deb --build "$pkg_dir" "$OUTPUT_DIR/$deb_name"
-
-  # Cleanup temp directory
-  rm -rf "$pkg_dir"
-  rm -f "$OUTPUT_DIR/$binary_name"
-
-  printf '[%s] Package created: %s\n' "$display_name" "$deb_name"
-}
-
-printf 'Building TunnelX %s for Linux %s...\n' "$VERSION" "$ARTIFACT_ARCH"
-build_component client Client
-build_component server Server
-
-DEB_COUNT="$(find "$OUTPUT_DIR" -maxdepth 1 -type f -name '*.deb' | wc -l | tr -d '[:space:]')"
-[[ "$DEB_COUNT" == "2" ]] || fail "expected two deb packages, found $DEB_COUNT"
-
-(
-  cd "$OUTPUT_DIR"
-  shasum -a 256 ./*.deb > SHA256SUMS
-)
-
-printf '\nBuild complete. Two Debian packages:\n'
-find "$OUTPUT_DIR" -maxdepth 1 -type f -name '*.deb' -print | sort
-printf 'Checksums: %s/SHA256SUMS\n' "$OUTPUT_DIR"
-printf '\nInstallation:\n'
-printf '  sudo dpkg -i TunnelX-Client-%s-linux-%s.deb\n' "$VERSION" "$ARTIFACT_ARCH"
-printf '  sudo dpkg -i TunnelX-Server-%s-linux-%s.deb\n' "$VERSION" "$ARTIFACT_ARCH"
+EOF
+  install -m 644 desktop/linux_dashboard.py "$pkg/usr/lib/$package/dashboard.py"
+  install -m 644 "$dashboard/public/tunnelx.svg" "$pkg/usr/share/icons/hicolor/scalable/apps/$package.svg"
+  cat > "$pkg/usr/bin/$launcher" <<EOF
+#!/bin/sh
+exec /usr/bin/python3 /usr/lib/$package/dashboard.py $component "\$@"
+EOF
+  chmod 755 "$pkg/usr/bin/$launcher"
+  cat > "$pkg/usr/share/applications/$launcher.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=TunnelX $display
+Comment=Open the local TunnelX Dashboard
+Exec=$launcher
+Icon=$package
+Terminal=false
+Categories=Network;
+EOF
+  artifact="TunnelX-$display-$version-linux-$ARCH.deb"
+  dpkg-deb --root-owner-group --build "$pkg" "$OUTPUT_DIR/$artifact"
+  ARTIFACTS+=("$artifact")
+done
+(cd "$OUTPUT_DIR" && sha256sum "${ARTIFACTS[@]}" > SHA256SUMS)
+printf '\nDebian packages: %s\n' "$OUTPUT_DIR"

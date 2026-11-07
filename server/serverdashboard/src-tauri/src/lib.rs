@@ -1,15 +1,32 @@
 use reqwest::Client;
 use serde_json::Value;
 use std::{collections::HashMap, io, path::Path, sync::Mutex};
-use tauri::{path::BaseDirectory, Manager};
+#[cfg(target_os = "windows")]
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    AppHandle,
+};
+use tauri::{path::BaseDirectory, Manager, RunEvent};
 use tauri_plugin_shell::{
     process::{CommandChild, CommandEvent},
     ShellExt,
 };
 
 struct ApiClient(Client);
+#[path = "../../../../desktop/window_preferences.rs"]
+mod window_preferences;
 struct ServerSidecar(Mutex<Option<CommandChild>>);
 struct ServerEndpoint(String);
+
+#[cfg(target_os = "windows")]
+fn show_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
 
 fn read_server_endpoint(config_path: &Path) -> io::Result<String> {
     let contents = std::fs::read_to_string(config_path)?;
@@ -44,9 +61,8 @@ fn read_server_endpoint(config_path: &Path) -> io::Result<String> {
             _ => {}
         }
     }
-    let port = port.ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidData, "server.bind_port is missing")
-    })?;
+    let port = port
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "server.bind_port is missing"))?;
     let scheme = if tls_enabled { "https" } else { "http" };
     Ok(format!("{}://127.0.0.1:{}", scheme, port))
 }
@@ -127,6 +143,48 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
+            #[cfg(target_os = "windows")]
+            window_preferences::init(app)?;
+            #[cfg(target_os = "windows")]
+            {
+                let show =
+                    MenuItem::with_id(app, "show", "打开 TunnelX Server", true, None::<&str>)?;
+                let hide = MenuItem::with_id(app, "hide", "隐藏到托盘", true, None::<&str>)?;
+                let quit =
+                    MenuItem::with_id(app, "quit", "退出 TunnelX Server", true, None::<&str>)?;
+                let menu = Menu::with_items(app, &[&show, &hide, &quit])?;
+                TrayIconBuilder::with_id("tunnelx-server")
+                    .icon(app.default_window_icon().expect("app icon").clone())
+                    .tooltip("TunnelX Server")
+                    .menu(&menu)
+                    .show_menu_on_left_click(false)
+                    .on_tray_icon_event(|tray, event| {
+                        if matches!(
+                            event,
+                            TrayIconEvent::Click {
+                                button: MouseButton::Left,
+                                button_state: MouseButtonState::Up,
+                                ..
+                            } | TrayIconEvent::DoubleClick {
+                                button: MouseButton::Left,
+                                ..
+                            }
+                        ) {
+                            show_main_window(tray.app_handle());
+                        }
+                    })
+                    .on_menu_event(|app, event| match event.id().as_ref() {
+                        "show" => show_main_window(app),
+                        "hide" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.hide();
+                            }
+                        }
+                        "quit" => app.exit(0),
+                        _ => {}
+                    })
+                    .build(app)?;
+            }
             let bundled_config = app.path().resolve("server.yaml", BaseDirectory::Resource)?;
             let config_dir = app.path().app_config_dir()?;
             std::fs::create_dir_all(&config_dir)?;
@@ -159,8 +217,26 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::Destroyed = event {
-                if let Some(state) = window.try_state::<ServerSidecar>() {
+            #[cfg(target_os = "windows")]
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                window_preferences::handle_close(window);
+            }
+            #[cfg(not(target_os = "windows"))]
+            let _ = (window, event);
+        })
+        .invoke_handler(tauri::generate_handler![
+            login,
+            api_request,
+            window_preferences::window_preferences,
+            window_preferences::set_close_behavior,
+            window_preferences::resolve_close_request
+        ])
+        .build(tauri::generate_context!())
+        .expect("error while building TunnelX Server")
+        .run(|app, event| {
+            if let RunEvent::Exit = event {
+                if let Some(state) = app.try_state::<ServerSidecar>() {
                     if let Ok(mut child) = state.0.lock() {
                         if let Some(process) = child.take() {
                             let _ = process.kill();
@@ -168,8 +244,5 @@ pub fn run() {
                     }
                 }
             }
-        })
-        .invoke_handler(tauri::generate_handler![login, api_request])
-        .run(tauri::generate_context!())
-        .expect("error while running TunnelX Server");
+        });
 }

@@ -90,6 +90,9 @@ func (c *Connection) Connect() error {
 	}
 
 	addr := net.JoinHostPort(c.config.ServerAddr, strconv.Itoa(c.config.ServerPort))
+	if transport.IsWebSocketAddress(c.config.ServerAddr) {
+		addr = c.config.ServerAddr
+	}
 	util.Info("Connecting to server: %s", addr)
 
 	conn, err := c.dialServer()
@@ -166,6 +169,20 @@ func (c *Connection) RemoveProxy(name string) {
 }
 
 func (c *Connection) dialServer() (net.Conn, error) {
+	endpoint, err := transport.ParseServerEndpoint(c.config.ServerAddr, c.config.ServerPort, c.config.TLS.Enable)
+	if err != nil {
+		return nil, err
+	}
+	if endpoint.WebSocket {
+		var tlsConfig *tls.Config
+		if endpoint.TLS {
+			tlsConfig, err = transport.NewTLSClientConfig(c.config.TLS.CAFile, false)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return transport.DialWebSocket(endpoint.Address, tlsConfig)
+	}
 	addr := net.JoinHostPort(c.config.ServerAddr, strconv.Itoa(c.config.ServerPort))
 	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
 	if err != nil || !c.config.TLS.Enable {
@@ -427,8 +444,8 @@ func bridgeConnections(a, b net.Conn, traffic *ProxyTraffic) {
 }
 
 func closeWrite(conn net.Conn) {
-	if tcp, ok := conn.(*net.TCPConn); ok {
-		_ = tcp.CloseWrite()
+	if writer, ok := conn.(interface{ CloseWrite() error }); ok {
+		_ = writer.CloseWrite()
 	}
 }
 

@@ -1,7 +1,9 @@
 use reqwest::{redirect::Policy, Client, Method};
 use serde_json::Value;
 use std::{sync::Mutex, time::Duration};
-#[cfg(target_os = "macos")]
+#[cfg(target_os = "windows")]
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
@@ -14,6 +16,8 @@ use tauri_plugin_shell::{
 };
 
 struct ApiClient(Client);
+#[path = "../../../../desktop/window_preferences.rs"]
+mod window_preferences;
 struct ClientSidecar {
     child: Mutex<Option<CommandChild>>,
     dashboard: Mutex<Result<Option<u16>, String>>,
@@ -72,9 +76,10 @@ async fn api_request(
     serde_json::from_str(&text).map_err(|e| format!("Invalid API response: {e}"))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn show_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
+        #[cfg(target_os = "macos")]
         let _ = app.set_dock_visibility(true);
         let _ = window.show();
         let _ = window.unminimize();
@@ -96,27 +101,54 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
-            #[cfg(target_os = "macos")]
+            #[cfg(target_os = "windows")]
+            window_preferences::init(app)?;
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             {
-                let show = MenuItem::with_id(app, "show", "Open TunnelX", true, None::<&str>)?;
-                let hide = MenuItem::with_id(app, "hide", "Hide to Menu Bar", true, None::<&str>)?;
-                let quit = MenuItem::with_id(app, "quit", "Quit TunnelX", true, None::<&str>)?;
+                #[cfg(target_os = "macos")]
+                let labels = ("Open TunnelX", "Hide to Menu Bar", "Quit TunnelX");
+                #[cfg(target_os = "windows")]
+                let labels = ("打开 TunnelX", "隐藏到托盘", "退出 TunnelX");
+                let show = MenuItem::with_id(app, "show", labels.0, true, None::<&str>)?;
+                let hide = MenuItem::with_id(app, "hide", labels.1, true, None::<&str>)?;
+                let quit = MenuItem::with_id(app, "quit", labels.2, true, None::<&str>)?;
                 let menu = Menu::with_items(app, &[&show, &hide, &quit])?;
-                TrayIconBuilder::with_id("tunnelx")
+                let tray = TrayIconBuilder::with_id("tunnelx")
                     .icon(app.default_window_icon().expect("app icon").clone())
                     .tooltip("TunnelX")
-                    .menu(&menu)
-                    .on_menu_event(|app, event| match event.id().as_ref() {
-                        "show" => show_main_window(app),
-                        "hide" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.close();
+                    .menu(&menu);
+                #[cfg(target_os = "windows")]
+                let tray = tray
+                    .show_menu_on_left_click(false)
+                    .on_tray_icon_event(|tray, event| {
+                        if matches!(
+                            event,
+                            TrayIconEvent::Click {
+                                button: MouseButton::Left,
+                                button_state: MouseButtonState::Up,
+                                ..
+                            } | TrayIconEvent::DoubleClick {
+                                button: MouseButton::Left,
+                                ..
                             }
+                        ) {
+                            show_main_window(tray.app_handle());
                         }
-                        "quit" => app.exit(0),
-                        _ => {}
-                    })
-                    .build(app)?;
+                    });
+                tray.on_menu_event(|app, event| match event.id().as_ref() {
+                    "show" => show_main_window(app),
+                    "hide" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            #[cfg(target_os = "macos")]
+                            let _ = window.close();
+                            #[cfg(target_os = "windows")]
+                            let _ = window.hide();
+                        }
+                    }
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .build(app)?;
             }
 
             let bundled_config = app.path().resolve("client.yaml", BaseDirectory::Resource)?;
@@ -172,6 +204,11 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            #[cfg(target_os = "windows")]
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                window_preferences::handle_close(window);
+            }
             #[cfg(target_os = "macos")]
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
@@ -180,10 +217,16 @@ pub fn run() {
                 }
             }
 
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
             let _ = (window, event);
         })
-        .invoke_handler(tauri::generate_handler![api_request, dashboard_port])
+        .invoke_handler(tauri::generate_handler![
+            api_request,
+            dashboard_port,
+            window_preferences::window_preferences,
+            window_preferences::set_close_behavior,
+            window_preferences::resolve_close_request
+        ])
         .build(tauri::generate_context!())
         .expect("error while building TunnelX")
         .run(|app, event| match event {

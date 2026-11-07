@@ -1,3 +1,5 @@
+websocket:
+    path: /proxy
 server:
     bind_addr: 0.0.0.0
     bind_port: 7100

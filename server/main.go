@@ -166,16 +166,26 @@ func (s *Server) Start() error {
 	}
 	util.Info("Server started on %s://%s", protocol, addr)
 
-	// 控制协议与 Dashboard 共用同一个 TCP 端口。
-	if s.dashboard != nil {
+	// Native TCP, WebSocket and the optional Dashboard share the server port.
+	{
 		// 使用 cmux 对已解密的流量进行协议复用。
 		multiplexer := cmux.New(listener)
 		httpListener := multiplexer.Match(cmux.HTTP1Fast())
 		controlListener := multiplexer.Match(cmux.Any())
 
 		go func() {
-			if err := s.dashboard.Serve(httpListener); err != nil && err != http.ErrServerClosed {
-				util.Error("Dashboard error: %v", err)
+			wrap := func(next http.Handler) http.Handler {
+				return transport.WebSocketHandler(s.config.WebSocket.Path, next, s.clientManager.HandleClient)
+			}
+			var serveErr error
+			if s.dashboard != nil {
+				serveErr = s.dashboard.Serve(httpListener, wrap)
+			} else {
+				server := &http.Server{Handler: wrap(http.NotFoundHandler()), ReadHeaderTimeout: 10 * time.Second}
+				serveErr = server.Serve(httpListener)
+			}
+			if serveErr != nil && serveErr != http.ErrServerClosed {
+				util.Error("HTTP/WebSocket listener: %v", serveErr)
 			}
 		}()
 		go func() {
@@ -184,6 +194,7 @@ func (s *Server) Start() error {
 			}
 		}()
 		listener = controlListener
+		util.Info("WebSocket transport enabled on %s", s.config.WebSocket.Path)
 	}
 
 	go s.handleSignals()

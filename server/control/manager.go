@@ -57,12 +57,20 @@ func NewManager(authenticator *auth.Authenticator, heartbeatTimeout time.Duratio
 }
 
 func (m *Manager) HandleClient(conn net.Conn) {
+	transferred := false
+	defer func() {
+		if !transferred {
+			conn.Close()
+		}
+	}()
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	msg, err := protocol.RecvMessage(conn)
 	if err != nil {
 		util.Error("Failed to receive register: %v", err)
 		conn.Close()
 		return
 	}
+	_ = conn.SetReadDeadline(time.Time{})
 
 	if msg.Type == protocol.TypeStartWorkConn {
 		var req protocol.StartWorkConn
@@ -72,6 +80,8 @@ func (m *Manager) HandleClient(conn net.Conn) {
 		}
 		if err := m.proxyManager.RegisterWorkConn(req.ConnectionID, conn); err != nil {
 			util.Error("Failed to register work conn: %v", err)
+		} else {
+			transferred = true
 		}
 		return
 	}

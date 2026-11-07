@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import {WindowBehaviorProvider} from "./WindowBehavior";
 
 const savedTheme=localStorage.getItem("tunnelx-theme");
 document.documentElement.dataset.theme=savedTheme==="light"||savedTheme==="dark"
@@ -9,6 +10,6 @@ document.documentElement.dataset.theme=savedTheme==="light"||savedTheme==="dark"
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    <App />
+    <WindowBehaviorProvider><App /></WindowBehaviorProvider>
   </React.StrictMode>,
 );

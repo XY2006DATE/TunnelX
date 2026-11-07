@@ -6,11 +6,9 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -20,6 +18,7 @@ import (
 	"github.com/XY2006DATE/TunnelX/client/request"
 	"github.com/XY2006DATE/TunnelX/common/config"
 	"github.com/XY2006DATE/TunnelX/common/protocol"
+	"github.com/XY2006DATE/TunnelX/common/transport"
 	"github.com/XY2006DATE/TunnelX/common/util"
 	"github.com/google/uuid"
 )
@@ -41,7 +40,12 @@ type Client struct {
 	requestManager               *request.Manager
 }
 
-func sessionKey(addr string, port int) string { return net.JoinHostPort(addr, strconv.Itoa(port)) }
+func sessionKey(addr string, port int) string {
+	if transport.IsWebSocketAddress(addr) {
+		return addr
+	}
+	return net.JoinHostPort(addr, strconv.Itoa(port))
+}
 
 func canReuseSession(currentToken, submittedToken string, connected bool) bool {
 	return connected || currentToken == submittedToken
@@ -55,46 +59,11 @@ func configuredTLS(value *bool, fallback bool) bool {
 }
 
 func normalizeServerEndpoint(raw string, fallbackPort int, fallbackTLS bool) (string, int, bool, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return "", 0, false, fmt.Errorf("服务端地址不能为空")
+	endpoint, err := transport.ParseServerEndpoint(raw, fallbackPort, fallbackTLS)
+	if err != nil {
+		return "", 0, false, err
 	}
-	if ip := net.ParseIP(strings.Trim(raw, "[]")); ip != nil {
-		if fallbackPort < 1 || fallbackPort > 65535 {
-			return "", 0, false, fmt.Errorf("控制端口必须在 1-65535 之间")
-		}
-		return ip.String(), fallbackPort, fallbackTLS, nil
-	}
-	candidate := raw
-	if !strings.Contains(candidate, "://") {
-		candidate = "server://" + candidate
-	}
-	u, err := url.Parse(candidate)
-	if err != nil || u.Hostname() == "" {
-		return "", 0, false, fmt.Errorf("服务端地址格式不正确")
-	}
-	tlsEnabled := fallbackTLS
-	switch strings.ToLower(u.Scheme) {
-	case "https", "tls":
-		tlsEnabled = true
-	case "http", "tcp":
-		tlsEnabled = false
-	case "server":
-		// An address without a scheme inherits the YAML tls.enable value.
-	default:
-		return "", 0, false, fmt.Errorf("服务端地址仅支持 http、https、tcp 或 tls 协议")
-	}
-	port := fallbackPort
-	if u.Port() != "" {
-		port, err = strconv.Atoi(u.Port())
-		if err != nil {
-			return "", 0, false, fmt.Errorf("控制端口格式不正确")
-		}
-	}
-	if port < 1 || port > 65535 {
-		return "", 0, false, fmt.Errorf("控制端口必须在 1-65535 之间")
-	}
-	return strings.ToLower(u.Hostname()), port, tlsEnabled, nil
+	return endpoint.Address, endpoint.Port, endpoint.TLS, nil
 }
 
 func NewClient(file string) (*Client, error) {
@@ -128,7 +97,13 @@ func NewClient(file string) (*Client, error) {
 		if p.ServerAddr == "" || p.ServerToken == "" {
 			continue
 		}
-		tlsEnabled := configuredTLS(p.ServerTLS, cfg.TLS.Enable)
+		endpoint, err := transport.ParseServerEndpoint(p.ServerAddr, p.ServerPort, configuredTLS(p.ServerTLS, cfg.TLS.Enable))
+		if err != nil {
+			return nil, fmt.Errorf("proxy %s server: %w", p.Name, err)
+		}
+		p.ServerAddr, p.ServerPort = endpoint.Address, endpoint.Port
+		tlsEnabled := endpoint.TLS
+		p.ServerTLS = &tlsEnabled
 		key := sessionKey(p.ServerAddr, p.ServerPort)
 		if existingTLS, ok := groupTLS[key]; ok && existingTLS != tlsEnabled {
 			return nil, fmt.Errorf("服务端 %s 同时配置了明文和 TLS 连接", key)
@@ -143,11 +118,18 @@ func NewClient(file string) (*Client, error) {
 		p := proxies[0]
 		c.addSession(key, p.ServerAddr, p.ServerPort, p.ServerToken, groupTLS[key], proxies)
 	}
-	for _, pending := range cfg.PendingDeletes {
+	for i := range cfg.PendingDeletes {
+		pending := &cfg.PendingDeletes[i]
 		if pending.ServerAddr == "" || pending.ServerPort == 0 || pending.ServerToken == "" {
 			continue
 		}
-		tlsEnabled := configuredTLS(pending.ServerTLS, cfg.TLS.Enable)
+		endpoint, err := transport.ParseServerEndpoint(pending.ServerAddr, pending.ServerPort, configuredTLS(pending.ServerTLS, cfg.TLS.Enable))
+		if err != nil {
+			return nil, fmt.Errorf("pending delete %s server: %w", pending.Name, err)
+		}
+		pending.ServerAddr, pending.ServerPort = endpoint.Address, endpoint.Port
+		tlsEnabled := endpoint.TLS
+		pending.ServerTLS = &tlsEnabled
 		key := sessionKey(pending.ServerAddr, pending.ServerPort)
 		if existing := c.sessions[key]; existing == nil {
 			c.addSession(key, pending.ServerAddr, pending.ServerPort, pending.ServerToken, tlsEnabled, nil)

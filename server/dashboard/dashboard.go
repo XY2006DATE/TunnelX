@@ -122,7 +122,7 @@ func (d *Dashboard) Start(bindAddr string) error {
 }
 
 // Serve runs the dashboard on an existing listener.
-func (d *Dashboard) Serve(listener net.Listener) error {
+func (d *Dashboard) Serve(listener net.Listener, wrappers ...func(http.Handler) http.Handler) error {
 	mux := http.NewServeMux()
 
 	// 首次设置与登录接口不需要现有会话。
@@ -153,9 +153,14 @@ func (d *Dashboard) Serve(listener net.Listener) error {
 	}
 	mux.Handle("/", http.FileServer(http.FS(webRoot)))
 
+	var handler http.Handler = mux
+	for _, wrap := range wrappers {
+		handler = wrap(handler)
+	}
 	d.server = &http.Server{
-		Addr:    listener.Addr().String(),
-		Handler: mux,
+		Addr:              listener.Addr().String(),
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	// 如果启用了 TLS，配置 HTTPS

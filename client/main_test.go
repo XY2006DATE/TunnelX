@@ -157,6 +157,52 @@ func TestSessionTokenReuseRules(t *testing.T) {
 	}
 }
 
+func TestWebSocketSessionsPreservePathsAfterRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "client.yaml")
+	content := `client_id: websocket-test
+log:
+  level: error
+proxies:
+  - server_addr: https://example.com/team-a/proxy
+    server_token: token-a
+    name: first
+    type: tcp
+    local_ip: 127.0.0.1
+    local_port: 8080
+    remote_port: 18080
+  - server_addr: wss://example.com/team-b/proxy
+    server_token: token-b
+    name: second
+    type: tcp
+    local_ip: 127.0.0.1
+    local_port: 8081
+    remote_port: 18081
+`
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewClient(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(client.sessions) != 2 || client.sessions["wss://example.com:443/team-a/proxy"] == nil || client.sessions["wss://example.com:443/team-b/proxy"] == nil {
+		t.Fatalf("WebSocket paths collapsed: %+v", client.sessions)
+	}
+	if err := client.deleteProxy("first", "wss://example.com:443/team-a/proxy", 443); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := NewClient(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(restarted.config.PendingDeletes) != 1 || restarted.config.PendingDeletes[0].ServerAddr != "wss://example.com:443/team-a/proxy" {
+		t.Fatal("deferred delete lost its WebSocket URL")
+	}
+	if restarted.sessions["wss://example.com:443/team-b/proxy"] == nil {
+		t.Fatal("deleting first path damaged second path")
+	}
+}
+
 func TestConfiguredTLSOverridesGlobalDefault(t *testing.T) {
 	enabled, disabled := true, false
 	if !configuredTLS(&enabled, false) {

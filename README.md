@@ -100,6 +100,36 @@ port_pool:
 - [服务端文档](server/README.md)
 - [客户端文档](client/README.md)
 
+## 通过 WebSocket 和 HTTPS 反向代理连接
+
+客户端的“完整服务地址”现在支持 `https://tunnel.example.com/proxy` 或 `wss://tunnel.example.com/proxy`。HTTPS/HTTP 地址包含非根路径时自动使用 WSS/WS；显式 `ws://`、`wss://` 未填写路径时使用 `/proxy`。原有不带路径的 `http://主机:7100`、`https://主机:7100` 继续使用原生 TCP/TLS 直连。
+
+服务端默认在控制端口 `7100` 上提供 `/proxy`，与管理界面共用端口；关闭 Dashboard 后 WebSocket 入口仍可使用。可在服务端 YAML 中修改路径：
+
+```yaml
+websocket:
+  path: /proxy
+```
+
+已有 Nginx HTTPS 网站时，将 [WebSocket 反向代理示例](examples/nginx-websocket.conf) 中的 `location` 放进现有 HTTPS `server` 块。示例由 Nginx 终止公网 TLS，再转发到同机 `http://127.0.0.1:7100/proxy`，对应 TunnelX 服务端 `tls.enable: false`。若 TunnelX 的 `7100` 本身启用了 TLS，则需配置带证书验证的 HTTPS 上游。Nginx 必须转发 WebSocket 的 `Upgrade` 和 `Connection` 头，详见 [Nginx 官方说明](https://nginx.org/en/docs/http/websocket.html)。外部路径不同也可以在反向代理中重写到服务端的 `/proxy`。
+
+客户端申请代理时直接填写完整入口，例如 `https://tunnel.example.com/proxy`，再填写服务端 Token、内网目标地址、目标端口和业务代理类型。控制连接、TCP/UDP 数据连接均通过该 WebSocket 入口，完整路径会随审批配置和待同步删除记录保存，重启后自动恢复。WSS 始终验证服务器证书；使用私有 CA 时，可在客户端 YAML 的 `tls.ca_file` 中指定 CA 证书。
+
+YAML 预配置也支持完整地址：
+
+```yaml
+proxies:
+  - name: web
+    server_addr: wss://tunnel.example.com/proxy
+    server_token: replace-with-the-server-token
+    type: tcp
+    local_ip: 127.0.0.1
+    local_port: 8080
+    remote_port: 18080
+```
+
+WebSocket 封装的是客户端与服务端之间的隧道连接，业务端口仍需在服务器上放行。外部使用者访问 TCP/UDP 业务时，应使用源站公网 IPv4 或直连域名及分配端口；这些业务端口不会自动变成 CDN 的网页路径。`HTTPS → HTTP` 业务代理仍按原有规则使用服务端 TLS 证书，与控制通道是否通过 WSS 无关。
+
 ## 从 YAML 预配置代理
 
 客户端也可以在启动前直接配置代理：
@@ -155,7 +185,23 @@ make build-macos
 
 默认构建当前 Mac 的原生架构，也可显式传入 `--arch arm64` 或 `--arch x86_64`。产物会写入 `dist/macos-<架构>/`。
 
-构建 Client/Server 的 Debian 安装包：
+客户端和服务端的当前发布版本统一为 `0.2.0`。
+
+Windows 桌面版的客户端和服务端首次点击右上角关闭按钮时，会询问“隐藏到托盘”还是“退出程序”。勾选“记住选择”后，下次直接执行所选操作；不勾选则每次询问，也可以取消本次关闭。登录前同样可以使用提示。
+
+在“设置 → 关闭窗口时”可随时切换“每次询问”“隐藏到系统托盘”或“退出程序”，修改立即生效并跨重启保留。隐藏到托盘时后台隧道继续运行，点击托盘图标或右键选择“打开”恢复窗口；选择“退出程序”或托盘菜单中的“退出”会停止对应后端。标题栏的最小化按钮仍会将窗口最小化到任务栏。
+
+在 Windows 上构建客户端和服务端的 x64 桌面安装包及 CLI 便携包：
+
+```powershell
+./build-windows.ps1
+```
+
+如果原输出目录中的安装包正在使用，可指定另一个 `dist` 子目录，例如 `./build-windows.ps1 -OutputDirectory dist/windows-x64-new`。
+
+需要 Go、Node.js/npm、Rust MSVC 工具链和 Visual Studio C++ 构建工具。产物位于 `dist/windows-x64/`，包括两个 NSIS `setup.exe`、两个 CLI ZIP 和 `SHA256SUMS`。CLI ZIP 解压后运行 `Run-Client.cmd` 或 `Run-Server.cmd`。可用 `-Arch arm64` 选择 ARM64（需要相应的 MSVC 交叉编译工具），已安装 npm 依赖时可传 `-SkipInstall`。
+
+构建 Client/Server 的 Debian 安装包。每个包都包含后台服务、桌面入口和 Web Dashboard。
 
 ```bash
 ./build-deb.sh --arch amd64
@@ -163,7 +209,20 @@ make build-macos
 make build-deb
 ```
 
-Debian 产物会写入 `dist/deb-<架构>/`。Tauri 的 `.app` 和 `.dmg` 必须在 macOS 上构建。
+Debian 产物会写入 `dist/deb-<架构>/`，分别使用客户端和服务端各自的版本号，并附带 `SHA256SUMS`。构建需要 Linux 上的 Go、Node.js/npm 和 `dpkg-deb`；Windows 可在 WSL 中运行。脚本默认重新构建 Web Dashboard，已有最新静态资源时可传 `--skip-web`。
+
+在存放安装包的目录使用 APT 安装并启动服务。以 amd64 服务端为例。
+
+```bash
+sudo apt install ./TunnelX-Server-0.2.0-linux-amd64.deb
+sudo systemctl enable --now tunnelx-server
+```
+
+安装客户端时选择 Client 安装包并启动 `tunnelx-client`。服务启动后，从 Linux 应用菜单打开 **TunnelX Server** 或 **TunnelX Client**，也可以直接在浏览器里打开管理页。默认管理端口分别为 7100 和 7101。桌面窗口和浏览器使用同一个服务与管理密码，首次打开时设置密码。修改过端口或启用了 HTTPS 时，在桌面窗口地址栏填入对应的本机地址。关闭窗口后，后台服务继续运行。
+
+APT 会为桌面入口安装 GTK 3 和 WebKitGTK 4.1 依赖。云服务器可以直接通过浏览器访问服务端管理页。配置和运行状态分别位于 `/var/lib/tunnelx-server/`、`/var/lib/tunnelx-client/`，日志通过 `journalctl -u tunnelx-server` 或 `journalctl -u tunnelx-client` 查看。重新安装保留配置和密码，`dpkg --purge` 清除对应组件的状态。
+
+Tauri 的 `.app` 和 `.dmg` 必须在 macOS 上构建。
 
 ## 项目结构
 
@@ -182,6 +241,19 @@ Debian 产物会写入 `dist/deb-<架构>/`。Tauri 的 `.app` 和 `.dmg` 必须
 ```bash
 make test
 ```
+
+发布产物的端到端测试：
+
+```powershell
+python scripts/smoke-test.py --client <客户端可执行文件> --server <服务端可执行文件>
+./scripts/test-windows.ps1
+```
+
+冒烟测试使用临时配置，验证密码设置和登录、申请及审批代理、TCP/UDP 实际转发和重启恢复。Windows 安装测试验证 NSIS 安装/卸载、桌面窗口及内嵌后端启动、关闭窗口后隐藏且后端继续响应，并恢复已有注册表项和配置文件。请先退出现有 TunnelX 进程。托盘图标恢复窗口和菜单主动退出需另外进行桌面交互验证。
+
+`scripts/test-window-preferences.cjs` 使用 Playwright 在无界面浏览器中，以模拟 Tauri 桥验证首次关闭提示、取消/记住选择、设置即时保存、页面重载和写入失败处理；不会操作本机正在运行的 TunnelX。运行需要可用的 `playwright` 模块和 Edge（也可用 `TUNNELX_PLAYWRIGHT_PATH` 指定模块路径）。Rust 的 `cargo test --release --lib` 还会验证默认询问、偏好跨重启保留和保存失败时不更改当前行为。
+
+在用于测试的 Ubuntu/Debian 环境中，以 root 运行 `bash scripts/test-deb.sh`，验证 amd64 deb 的安装、systemd 服务、重新安装保留状态及独立卸载。脚本会拒绝覆盖已有 TunnelX 安装，完成后移除测试安装。
 
 ## 许可证
 
