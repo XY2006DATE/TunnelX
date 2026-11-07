@@ -107,7 +107,7 @@ tls:
 
 客户端可以在 Dashboard 中直接填写 `https://域名:端口/`，或设置 `tls.enable: true`。使用公共 CA 证书时客户端可将 `tls.ca_file` 留空并使用操作系统可信根；使用私有 CA 时则应填写对应 CA 文件。客户端会校验证书链和服务端域名。
 
-服务端启用 TLS 后，HTTPS 代理会复用同一张证书。公网 HTTPS 请求在服务端解密，随后通过隧道以普通 HTTP 转发到客户端本地服务。例如本地 `http://127.0.0.1:8080/doc.html` 映射到公网端口 8080 后，可使用 `https://tunnel.example.com:8080/doc.html` 访问，本地服务无需配置证书。证书需要覆盖 `tunnel.example.com`，且 8080 必须处于 `port_pool` 范围内并对公网开放。
+服务端启用 TLS 后，HTTPS 代理会复用同一张证书。公网 HTTPS 请求在服务端解密，随后通过隧道以普通 HTTP 转发到客户端本地服务。例如将本地的 `http://127.0.0.1:8080/doc.html` 映射到公网端口 8080 后，可以通过 `https://tunnel.example.com:8080/doc.html` 访问。证书需要覆盖访问时使用的域名，且 8080 必须处于 `port_pool` 范围内并对公网开放。
 
 ## systemd 示例
 

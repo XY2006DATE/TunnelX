@@ -102,7 +102,7 @@ port_pool:
 
 ## 通过 WebSocket 和 HTTPS 反向代理连接
 
-客户端的“完整服务地址”现在支持 `https://tunnel.example.com/proxy` 或 `wss://tunnel.example.com/proxy`。HTTPS/HTTP 地址包含非根路径时自动使用 WSS/WS；显式 `ws://`、`wss://` 未填写路径时使用 `/proxy`。原有不带路径的 `http://主机:7100`、`https://主机:7100` 继续使用原生 TCP/TLS 直连。
+客户端的“完整服务地址”支持 `https://tunnel.example.com/proxy` 或 `wss://tunnel.example.com/proxy`。HTTPS/HTTP 地址包含非根路径时自动使用 WSS/WS；显式 `ws://`、`wss://` 未填写路径时使用 `/proxy`。原有不带路径的 `http://主机:7100`、`https://主机:7100` 继续使用原生 TCP/TLS 直连。
 
 服务端默认在控制端口 `7100` 上提供 `/proxy`，与管理界面共用端口；关闭 Dashboard 后 WebSocket 入口仍可使用。可在服务端 YAML 中修改路径：
 
